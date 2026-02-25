@@ -19,21 +19,26 @@ use crate::{
 pub struct RegexBuilder {
     parser_builder: ParserBuilder,
     exprset: ExprSet,
-    json_quote_cache: HashMap<ExprRef, ExprRef>,
+    json_quote_caches: HashMap<char, HashMap<ExprRef, ExprRef>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct JsonQuoteOptions {
     /// Which escapes to allow (after \).
     /// Represents a set of bytes. Allowed bytes:
-    /// n, r, b, t, f, \, ", u
+    /// n, r, b, t, f, \, ", ', u
     /// Note that 'u' allows the \uXXXX form only for ASCII control
     /// characters, not general Unicode, in particular for characters
     /// \u0000-\u001F and \u007F (if they are allowed by the regex).
     pub allowed_escapes: String,
 
-    /// When set, "..." will not be added around the final regular expression.
+    /// When set, the quote_char delimiters will not be added around the final
+    /// regular expression.
     pub raw_mode: bool,
+
+    /// The character used for quoting strings. Defaults to `'"'` for JSON.
+    /// Set to `'\''` for Python single-quoted strings.
+    pub quote_char: char,
 }
 
 impl JsonQuoteOptions {
@@ -42,6 +47,7 @@ impl JsonQuoteOptions {
             // \uXXXX not allowed
             allowed_escapes: "nrbtf\\\"".to_string(),
             raw_mode: true,
+            quote_char: '"',
         }
     }
 
@@ -50,6 +56,7 @@ impl JsonQuoteOptions {
             // allow \uXXXX
             allowed_escapes: "nrbtf\\\"u".to_string(),
             raw_mode: true,
+            quote_char: '"',
         }
     }
 
@@ -58,6 +65,7 @@ impl JsonQuoteOptions {
             // allow \uXXXX
             allowed_escapes: "nrbtf\\\"u".to_string(),
             raw_mode: false,
+            quote_char: '"',
         }
     }
 
@@ -302,7 +310,7 @@ impl RegexBuilder {
         Self {
             parser_builder: ParserBuilder::new(),
             exprset: ExprSet::new(256),
-            json_quote_cache: HashMap::default(),
+            json_quote_caches: HashMap::default(),
         }
     }
 
@@ -335,11 +343,13 @@ impl RegexBuilder {
     }
 
     pub fn json_quote(&mut self, e: ExprRef, options: &JsonQuoteOptions) -> Result<ExprRef> {
-        // returns Some(X) iff b should quoted as \X
-        fn quote(b: u8) -> Option<u8> {
+        let qc = options.quote_char as u8;
+
+        // returns Some(X) iff b should be quoted as \X
+        fn quote(b: u8, qc: u8) -> Option<u8> {
             match b {
                 b'\\' => Some(b'\\'),
-                b'"' => Some(b'"'),
+                c if c == qc => Some(c),
                 0x08 => Some(b'b'),
                 0x0C => Some(b'f'),
                 b'\n' => Some(b'n'),
@@ -352,8 +362,9 @@ impl RegexBuilder {
         // byteset of all possible single-char quotes
         fn single_quote_byteset(include_nl: bool, options: &JsonQuoteOptions) -> Vec<u32> {
             let mut quoted_bs = byteset_256();
-            for c in b"\"\\bfrt" {
-                options.set_if_allowed(&mut quoted_bs, *c);
+            let qc = options.quote_char as u8;
+            for c in [qc, b'\\', b'b', b'f', b'r', b't'] {
+                options.set_if_allowed(&mut quoted_bs, c);
             }
             if include_nl {
                 options.set_if_allowed(&mut quoted_bs, b'n');
@@ -409,6 +420,7 @@ impl RegexBuilder {
             bs: Vec<u32>,
             options: &JsonQuoteOptions,
         ) -> ExprRef {
+            let qc = options.quote_char as u8;
             let upref = exprset.mk_literal("u00");
             let backslash = exprset.mk_byte(b'\\');
 
@@ -423,7 +435,7 @@ impl RegexBuilder {
                 let mut other_bytes = vec![];
                 for b in 0..32 {
                     if byteset_contains(&bs, b) {
-                        if let Some(q) = quote(b as u8) {
+                        if let Some(q) = quote(b as u8, qc) {
                             options.set_if_allowed(&mut quoted_bs, q);
                         }
                         if options.is_allowed(b'u') {
@@ -452,11 +464,12 @@ impl RegexBuilder {
                 }
                 byteset_clear(&mut bs_without_ctrl, b'\\' as usize);
             }
-            if byteset_contains(&bs_without_ctrl, b'"' as usize) {
-                if options.is_allowed(b'"') {
-                    alts.push(exprset.mk_literal("\\\""));
+            if byteset_contains(&bs_without_ctrl, qc as usize) {
+                if options.is_allowed(qc) {
+                    let escaped = format!("\\{}", qc as char);
+                    alts.push(exprset.mk_literal(&escaped));
                 }
-                byteset_clear(&mut bs_without_ctrl, b'"' as usize);
+                byteset_clear(&mut bs_without_ctrl, qc as usize);
             }
             if byteset_contains(&bs_without_ctrl, 0x7F) {
                 if options.is_allowed(b'u') {
@@ -472,19 +485,20 @@ impl RegexBuilder {
 
         for c in options.allowed_escapes.as_bytes() {
             ensure!(
-                b"\"\\bfnrtu".contains(c),
+                b"\"'\\bfnrtu".contains(c),
                 "invalid escape character in allowed_escapes: {}",
                 *c as char
             );
         }
 
-        fn byte_needs_quote(b: u8) -> bool {
-            matches!(b, b'\\' | b'"' | 0x7F | 0..0x20)
+        fn byte_needs_quote(b: u8, qc: u8) -> bool {
+            b == b'\\' || b == qc || b == 0x7F || b < 0x20
         }
 
+        let cache = self.json_quote_caches.entry(options.quote_char).or_default();
         let r = self.exprset.map(
             e,
-            &mut self.json_quote_cache,
+            cache,
             false,
             |e| e,
             |exprset, args, e| -> ExprRef {
@@ -493,7 +507,7 @@ impl RegexBuilder {
                         let has_bytes_below_0x20 = bs[0] != 0;
                         if has_bytes_below_0x20
                             || byteset_contains(bs, b'\\' as usize)
-                            || byteset_contains(bs, b'"' as usize)
+                            || byteset_contains(bs, qc as usize)
                             || byteset_contains(bs, 0x7F)
                         {
                             let bs = bs.to_vec();
@@ -504,7 +518,7 @@ impl RegexBuilder {
                         }
                     }
                     Expr::Byte(b) => {
-                        if byte_needs_quote(b) {
+                        if byte_needs_quote(b, qc) {
                             quote_byteset(exprset, byteset_from_range(b, b), options)
                         } else {
                             // no need to quote
@@ -512,13 +526,13 @@ impl RegexBuilder {
                         }
                     }
                     Expr::ByteConcat(_, bytes, args0) => {
-                        if bytes.iter().any(|b| byte_needs_quote(*b)) {
+                        if bytes.iter().any(|b| byte_needs_quote(*b, qc)) {
                             let mut acc = vec![];
                             let mut idx = 0;
                             let bytes = bytes.to_vec();
                             while idx < bytes.len() {
                                 let idx0 = idx;
-                                while idx < bytes.len() && !byte_needs_quote(bytes[idx]) {
+                                while idx < bytes.len() && !byte_needs_quote(bytes[idx], qc) {
                                     idx += 1;
                                 }
                                 let slice = &bytes[idx0..idx];
@@ -556,11 +570,11 @@ impl RegexBuilder {
             },
         );
 
-        let quote = self.exprset.mk_byte(b'"');
+        let quote_byte = self.exprset.mk_byte(qc);
         let r = if options.raw_mode {
             r
         } else {
-            self.exprset.mk_concat_vec(&[quote, r, quote])
+            self.exprset.mk_concat_vec(&[quote_byte, r, quote_byte])
         };
         Ok(r)
     }
