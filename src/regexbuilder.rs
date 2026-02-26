@@ -533,6 +533,21 @@ impl RegexBuilder {
             "quote_char must be ASCII, got U+{:04X}",
             options.quote_char as u32
         );
+
+        // UnicodeXXXX can only represent bytes 0x00-0x7F; reject must_escape
+        // bytes >= 0x80 unless they have a single-char escape mapping.
+        if matches!(options.fallback_escape, FallbackEscapeFormat::UnicodeXXXX) {
+            for &b in &options.must_escape {
+                if b >= 0x80 {
+                    ensure!(
+                        options.single_char_escapes.iter().any(|(byte, _)| *byte == b),
+                        "UnicodeXXXX fallback cannot represent byte 0x{:02X} (>= 0x80); \
+                         use HexHH or add a single_char_escape for it",
+                        b
+                    );
+                }
+            }
+        }
         let qc = options.quote_char as u8;
 
         // Build a lookup table: byte -> Some(escape_char) for single-char escapes
