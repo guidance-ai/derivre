@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 use crate::HashMap;
 use anyhow::{ensure, Result};
@@ -52,7 +52,7 @@ pub enum QuoteEscapeMethod {
 /// given language/format. The [`RegexBuilder::string_escape`] method uses these
 /// options to transform a regex R into R' such that strings matching R', when
 /// unescaped, produce strings matching R.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StringEscapeOptions {
     /// Mappings from byte value to the character placed after the backslash.
     /// For example, `(0x0A, b'n')` means byte 0x0A is escaped as `\n`.
@@ -80,46 +80,15 @@ pub struct StringEscapeOptions {
     pub raw_mode: bool,
 }
 
-impl PartialEq for StringEscapeOptions {
-    fn eq(&self, other: &Self) -> bool {
-        self.quote_char == other.quote_char
-            && self.raw_mode == other.raw_mode
-            && self.quote_escape == other.quote_escape
-            && self.fallback_escape == other.fallback_escape
-            && {
-                let mut a = self.single_char_escapes.clone();
-                let mut b = other.single_char_escapes.clone();
-                a.sort();
-                b.sort();
-                a == b
-            }
-            && {
-                let mut a = self.must_escape.clone();
-                let mut b = other.must_escape.clone();
-                a.sort();
-                b.sort();
-                a == b
-            }
-    }
-}
-impl Eq for StringEscapeOptions {}
-
-impl Hash for StringEscapeOptions {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.quote_char.hash(state);
-        self.raw_mode.hash(state);
-        self.quote_escape.hash(state);
-        self.fallback_escape.hash(state);
-        let mut sce = self.single_char_escapes.clone();
-        sce.sort();
-        sce.hash(state);
-        let mut me = self.must_escape.clone();
-        me.sort();
-        me.hash(state);
-    }
-}
-
 impl StringEscapeOptions {
+    /// Sort and deduplicate Vec fields so that Hash/Eq are order-independent
+    /// across differently-constructed instances with the same logical content.
+    pub fn normalize(&mut self) {
+        self.single_char_escapes.sort();
+        self.single_char_escapes.dedup();
+        self.must_escape.sort();
+        self.must_escape.dedup();
+    }
     /// Build options equivalent to JSON string escaping with `\uXXXX` fallback.
     pub fn json() -> Self {
         Self {
@@ -530,6 +499,10 @@ impl RegexBuilder {
         e: ExprRef,
         options: &StringEscapeOptions,
     ) -> Result<ExprRef> {
+        // Normalize Vec fields for consistent Hash/Eq cache behavior
+        let mut options = options.clone();
+        options.normalize();
+
         ensure!(
             options.quote_char.is_ascii(),
             "quote_char must be ASCII, got U+{:04X}",
@@ -824,6 +797,7 @@ impl RegexBuilder {
             .string_escape_caches
             .entry(options.clone())
             .or_default();
+        let options = &options;
         let r = self.exprset.map(
             e,
             cache,
