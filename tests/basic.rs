@@ -553,7 +553,7 @@ fn test_string_escape_doubling() {
         fallback_escape: FallbackEscapeFormat::None,
         quote_char: '\'',
         quote_escape: QuoteEscapeMethod::Doubling,
-        must_escape: vec![],  // only quote_char and backslash are implicitly escaped
+        must_escape: vec![],
         raw_mode: false,
     };
 
@@ -563,6 +563,13 @@ fn test_string_escape_doubling() {
     // 'a' matches; single quote must be doubled: ''''  (open-quote, doubled-quote, close-quote)
     match_many(&mut rx, &["'a'", "''''"]);
     no_match_many(&mut rx, &["a", "'\\''", "'"]);
+
+    // Backslash is literal in YAML single-quoted mode — not an escape prefix
+    let e = b.mk_regex(r#"[a\\]"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["'a'", "'\\'"]); // literal backslash, not escaped
+    no_match_many(&mut rx, &["'\\\\'"]); // double-backslash should NOT match
 }
 
 #[test]

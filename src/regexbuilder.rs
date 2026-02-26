@@ -512,21 +512,34 @@ impl RegexBuilder {
             escape_map[byte as usize] = Some(esc);
         }
 
-        // Build must_escape byteset (including implicit backslash + quote_char)
+        // Build must_escape byteset (including implicit quote_char, and backslash
+        // when the grammar uses backslash as an escape prefix)
         let mut must_escape_set = [false; 256];
         for &b in &options.must_escape {
             must_escape_set[b as usize] = true;
         }
-        must_escape_set[b'\\' as usize] = true;
+        // Backslash is an escape prefix when: there are single-char escapes,
+        // there's a fallback escape format, or the quote char is backslash-escaped.
+        let uses_backslash = !options.single_char_escapes.is_empty()
+            || !matches!(options.fallback_escape, FallbackEscapeFormat::None)
+            || matches!(options.quote_escape, QuoteEscapeMethod::Backslash);
+        if uses_backslash {
+            must_escape_set[b'\\' as usize] = true;
+        }
         must_escape_set[qc as usize] = true;
 
         let has_fallback = !matches!(options.fallback_escape, FallbackEscapeFormat::None);
 
         // returns Some(X) iff b should be escaped as \X (single-char)
-        fn quote_single(b: u8, qc: u8, escape_map: &[Option<u8>; 256]) -> Option<u8> {
+        fn quote_single(
+            b: u8,
+            qc: u8,
+            uses_backslash: bool,
+            escape_map: &[Option<u8>; 256],
+        ) -> Option<u8> {
             match b {
-                b'\\' => Some(b'\\'),
-                c if c == qc => Some(c),
+                b'\\' if uses_backslash => Some(b'\\'),
+                c if c == qc && uses_backslash => Some(c),
                 _ => escape_map[b as usize],
             }
         }
@@ -536,13 +549,15 @@ impl RegexBuilder {
         fn single_escape_char_byteset(
             include_nl_byte: bool,
             qc: u8,
+            uses_backslash: bool,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
         ) -> Vec<u32> {
             let mut bs = byteset_256();
-            // Always include quote_char and backslash escape chars
-            byteset_set(&mut bs, qc as usize);
-            byteset_set(&mut bs, b'\\' as usize);
+            if uses_backslash {
+                byteset_set(&mut bs, qc as usize);
+                byteset_set(&mut bs, b'\\' as usize);
+            }
             for b in 0..=255u8 {
                 if !must_escape_set[b as usize] {
                     continue;
@@ -620,6 +635,7 @@ impl RegexBuilder {
             exprset: &mut ExprSet,
             include_nl: bool,
             qc: u8,
+            uses_backslash: bool,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
             options: &StringEscapeOptions,
@@ -628,6 +644,7 @@ impl RegexBuilder {
             let single_esc = exprset.mk_byte_set(&single_escape_char_byteset(
                 include_nl,
                 qc,
+                uses_backslash,
                 escape_map,
                 must_escape_set,
             ));
@@ -641,6 +658,7 @@ impl RegexBuilder {
             exprset: &mut ExprSet,
             bs: Vec<u32>,
             qc: u8,
+            uses_backslash: bool,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
             has_fallback: bool,
@@ -650,16 +668,16 @@ impl RegexBuilder {
 
             let quoted = if bs[0] == !(1 << b'\n') {
                 // everything except for \n
-                quote_all_ctrl(exprset, false, qc, escape_map, must_escape_set, options)
+                quote_all_ctrl(exprset, false, qc, uses_backslash, escape_map, must_escape_set, options)
             } else if bs[0] == 0xffff_ffff {
                 // everything
-                quote_all_ctrl(exprset, true, qc, escape_map, must_escape_set, options)
+                quote_all_ctrl(exprset, true, qc, uses_backslash, escape_map, must_escape_set, options)
             } else {
                 let mut quoted_bs = byteset_256();
                 let mut other_bytes = vec![];
                 for b in 0..32 {
                     if byteset_contains(&bs, b) {
-                        if let Some(q) = quote_single(b as u8, qc, escape_map) {
+                        if let Some(q) = quote_single(b as u8, qc, uses_backslash, escape_map) {
                             byteset_set(&mut quoted_bs, q as usize);
                         }
                         if has_fallback {
@@ -692,7 +710,7 @@ impl RegexBuilder {
             let mut bs_without_ctrl = bs;
             bs_without_ctrl[0] = 0;
             let mut alts = vec![quoted];
-            if byteset_contains(&bs_without_ctrl, b'\\' as usize) {
+            if byteset_contains(&bs_without_ctrl, b'\\' as usize) && uses_backslash {
                 alts.push(exprset.mk_literal("\\\\"));
                 byteset_clear(&mut bs_without_ctrl, b'\\' as usize);
             }
@@ -757,6 +775,7 @@ impl RegexBuilder {
                                 exprset,
                                 bs,
                                 qc,
+                                uses_backslash,
                                 &escape_map,
                                 &must_escape_set,
                                 has_fallback,
@@ -772,6 +791,7 @@ impl RegexBuilder {
                                 exprset,
                                 byteset_from_range(b, b),
                                 qc,
+                                uses_backslash,
                                 &escape_map,
                                 &must_escape_set,
                                 has_fallback,
@@ -806,6 +826,7 @@ impl RegexBuilder {
                                         exprset,
                                         byteset_from_range(b, b),
                                         qc,
+                                        uses_backslash,
                                         &escape_map,
                                         &must_escape_set,
                                         has_fallback,
