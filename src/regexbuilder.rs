@@ -591,42 +591,25 @@ impl RegexBuilder {
             include_nl: bool,
             options: &StringEscapeOptions,
         ) -> ExprRef {
-            match options.fallback_escape {
-                FallbackEscapeFormat::UnicodeXXXX => {
-                    let upref = exprset.mk_literal("u00");
-                    if include_nl {
-                        let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
-                        let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
-                        exprset.mk_concat_vec(&[upref, hex0, hex1])
-                    } else {
-                        let n0 = exprset.mk_byte(b'0');
-                        let n1 = exprset.mk_byte(b'1');
-                        let hex0 = exprset.mk_byte_set(&hex_byteset(false));
-                        let hex0 = exprset.mk_concat(n0, hex0);
-                        let hex1 = exprset.mk_byte_set(&hex_byteset(true));
-                        let hex1 = exprset.mk_concat(n1, hex1);
-                        let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
-                        exprset.mk_concat(upref, hex01)
-                    }
-                }
-                FallbackEscapeFormat::HexHH => {
-                    let xpref = exprset.mk_literal("x");
-                    if include_nl {
-                        let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
-                        let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
-                        exprset.mk_concat_vec(&[xpref, hex0, hex1])
-                    } else {
-                        let n0 = exprset.mk_byte(b'0');
-                        let n1 = exprset.mk_byte(b'1');
-                        let hex0 = exprset.mk_byte_set(&hex_byteset(false));
-                        let hex0 = exprset.mk_concat(n0, hex0);
-                        let hex1 = exprset.mk_byte_set(&hex_byteset(true));
-                        let hex1 = exprset.mk_concat(n1, hex1);
-                        let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
-                        exprset.mk_concat(xpref, hex01)
-                    }
-                }
-                FallbackEscapeFormat::None => ExprRef::NO_MATCH,
+            let prefix_str = match options.fallback_escape {
+                FallbackEscapeFormat::UnicodeXXXX => "u00",
+                FallbackEscapeFormat::HexHH => "x",
+                FallbackEscapeFormat::None => return ExprRef::NO_MATCH,
+            };
+            let prefix = exprset.mk_literal(prefix_str);
+            if include_nl {
+                let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
+                let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
+                exprset.mk_concat_vec(&[prefix, hex0, hex1])
+            } else {
+                let n0 = exprset.mk_byte(b'0');
+                let n1 = exprset.mk_byte(b'1');
+                let hex0 = exprset.mk_byte_set(&hex_byteset(false));
+                let hex0 = exprset.mk_concat(n0, hex0);
+                let hex1 = exprset.mk_byte_set(&hex_byteset(true));
+                let hex1 = exprset.mk_concat(n1, hex1);
+                let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
+                exprset.mk_concat(prefix, hex01)
             }
         }
 
