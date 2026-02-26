@@ -21,6 +21,7 @@ pub struct RegexBuilder {
     parser_builder: ParserBuilder,
     exprset: ExprSet,
     string_escape_caches: HashMap<StringEscapeOptions, HashMap<ExprRef, ExprRef>>,
+    json_quote_options_cache: HashMap<JsonQuoteOptions, StringEscapeOptions>,
 }
 
 /// Fallback escape format for bytes that need escaping but lack a single-char
@@ -154,7 +155,7 @@ impl StringEscapeOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct JsonQuoteOptions {
     /// Which escapes to allow (after \).
     /// Represents a set of bytes. Allowed bytes:
@@ -474,6 +475,7 @@ impl RegexBuilder {
             parser_builder: ParserBuilder::new(),
             exprset: ExprSet::new(256),
             string_escape_caches: HashMap::default(),
+            json_quote_options_cache: HashMap::default(),
         }
     }
 
@@ -513,7 +515,11 @@ impl RegexBuilder {
                 *c as char
             );
         }
-        let se_options = options.to_string_escape_options();
+        let se_options = self
+            .json_quote_options_cache
+            .entry(options.clone())
+            .or_insert_with(|| options.to_string_escape_options())
+            .clone();
         self.string_escape(e, &se_options)
     }
 
