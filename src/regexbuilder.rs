@@ -717,8 +717,7 @@ impl RegexBuilder {
                     let prefix = match options.fallback_escape {
                         FallbackEscapeFormat::UnicodeXXXX => exprset.mk_literal("u00"),
                         FallbackEscapeFormat::HexHH => exprset.mk_literal("x"),
-                        // has_fallback is false when None, so this arm is not reachable
-                        FallbackEscapeFormat::None => ExprRef::NO_MATCH,
+                        FallbackEscapeFormat::None => unreachable!(),
                     };
                     exprset.mk_concat(prefix, other_bytes)
                 } else {
@@ -771,8 +770,7 @@ impl RegexBuilder {
                         let prefix = match options.fallback_escape {
                             FallbackEscapeFormat::UnicodeXXXX => "\\u00",
                             FallbackEscapeFormat::HexHH => "\\x",
-                            // has_fallback is false when None, so this arm is not reachable
-                            FallbackEscapeFormat::None => continue,
+                            FallbackEscapeFormat::None => unreachable!(),
                         };
                         alts.push(exprset.mk_literal(&format!("{}{}", prefix, lit_lower)));
                         alts.push(exprset.mk_literal(&format!("{}{}", prefix, lit_upper)));
