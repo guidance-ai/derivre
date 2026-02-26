@@ -802,8 +802,8 @@ impl RegexBuilder {
             exprset.mk_or(&mut alts)
         }
 
-        fn byte_needs_escape(b: u8, qc: u8, must_escape_set: &[bool; 256]) -> bool {
-            b == b'\\' || b == qc || must_escape_set[b as usize]
+        fn byte_needs_escape(b: u8, qc: u8, uses_backslash: bool, must_escape_set: &[bool; 256]) -> bool {
+            (b == b'\\' && uses_backslash) || b == qc || must_escape_set[b as usize]
         }
 
         let cache = self
@@ -821,7 +821,7 @@ impl RegexBuilder {
                         // Check if any byte in the set needs escaping
                         let needs = (0..=255u8).any(|b| {
                             byteset_contains(bs, b as usize)
-                                && byte_needs_escape(b, qc, &must_escape_set)
+                                && byte_needs_escape(b, qc, uses_backslash, &must_escape_set)
                         });
                         if needs {
                             let bs = bs.to_vec();
@@ -840,7 +840,7 @@ impl RegexBuilder {
                         }
                     }
                     Expr::Byte(b) => {
-                        if byte_needs_escape(b, qc, &must_escape_set) {
+                        if byte_needs_escape(b, qc, uses_backslash, &must_escape_set) {
                             quote_byteset(
                                 exprset,
                                 byteset_from_range(b, b),
@@ -858,7 +858,7 @@ impl RegexBuilder {
                     Expr::ByteConcat(_, bytes, args0) => {
                         if bytes
                             .iter()
-                            .any(|b| byte_needs_escape(*b, qc, &must_escape_set))
+                            .any(|b| byte_needs_escape(*b, qc, uses_backslash, &must_escape_set))
                         {
                             let mut acc = vec![];
                             let mut idx = 0;
@@ -866,7 +866,7 @@ impl RegexBuilder {
                             while idx < bytes.len() {
                                 let idx0 = idx;
                                 while idx < bytes.len()
-                                    && !byte_needs_escape(bytes[idx], qc, &must_escape_set)
+                                    && !byte_needs_escape(bytes[idx], qc, uses_backslash, &must_escape_set)
                                 {
                                     idx += 1;
                                 }
