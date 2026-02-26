@@ -598,9 +598,15 @@ impl RegexBuilder {
             must_escape_set: &[bool; 256],
         ) -> Vec<u32> {
             let mut bs = byteset_256();
+            // Only add qc/backslash if they fall in the control range (< 0x20),
+            // since this byteset is used by the fast path that handles 0x00-0x1F.
             if uses_backslash {
-                byteset_set(&mut bs, qc as usize);
-                byteset_set(&mut bs, b'\\' as usize);
+                if qc < 0x20 {
+                    byteset_set(&mut bs, qc as usize);
+                }
+                if b'\\' < 0x20 {
+                    byteset_set(&mut bs, b'\\' as usize);
+                }
             }
             for b in 0..=255u8 {
                 if !must_escape_set[b as usize] {
