@@ -499,6 +499,11 @@ impl RegexBuilder {
         e: ExprRef,
         options: &StringEscapeOptions,
     ) -> Result<ExprRef> {
+        ensure!(
+            options.quote_char.is_ascii(),
+            "quote_char must be ASCII, got U+{:04X}",
+            options.quote_char as u32
+        );
         let qc = options.quote_char as u8;
 
         // Build a lookup table: byte -> Some(escape_char) for single-char escapes
