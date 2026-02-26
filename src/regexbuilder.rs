@@ -83,8 +83,20 @@ impl PartialEq for StringEscapeOptions {
             && self.raw_mode == other.raw_mode
             && self.quote_escape == other.quote_escape
             && self.fallback_escape == other.fallback_escape
-            && self.single_char_escapes == other.single_char_escapes
-            && self.must_escape == other.must_escape
+            && {
+                let mut a = self.single_char_escapes.clone();
+                let mut b = other.single_char_escapes.clone();
+                a.sort();
+                b.sort();
+                a == b
+            }
+            && {
+                let mut a = self.must_escape.clone();
+                let mut b = other.must_escape.clone();
+                a.sort();
+                b.sort();
+                a == b
+            }
     }
 }
 impl Eq for StringEscapeOptions {}
@@ -95,8 +107,12 @@ impl Hash for StringEscapeOptions {
         self.raw_mode.hash(state);
         self.quote_escape.hash(state);
         self.fallback_escape.hash(state);
-        self.single_char_escapes.hash(state);
-        self.must_escape.hash(state);
+        let mut sce = self.single_char_escapes.clone();
+        sce.sort();
+        sce.hash(state);
+        let mut me = self.must_escape.clone();
+        me.sort();
+        me.hash(state);
     }
 }
 
