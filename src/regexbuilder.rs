@@ -675,17 +675,26 @@ impl RegexBuilder {
             } else {
                 let mut quoted_bs = byteset_256();
                 let mut other_bytes = vec![];
-                for b in 0..32 {
-                    if byteset_contains(&bs, b) {
-                        if let Some(q) = quote_single(b as u8, qc, uses_backslash, escape_map) {
-                            byteset_set(&mut quoted_bs, q as usize);
-                        }
-                        if has_fallback {
-                            let other = exprset.mk_literal(&format!("{:02x}", b));
-                            other_bytes.push(other);
-                            let other = exprset.mk_literal(&format!("{:02X}", b));
-                            other_bytes.push(other);
-                        }
+                // Handle all must-escape bytes that are in the byteset
+                for b in 0..=255u8 {
+                    if !byteset_contains(&bs, b as usize) {
+                        continue;
+                    }
+                    if !must_escape_set[b as usize] {
+                        continue;
+                    }
+                    // Skip backslash and qc — handled separately below
+                    if (b == b'\\' && uses_backslash) || b == qc {
+                        continue;
+                    }
+                    if let Some(q) = quote_single(b, qc, uses_backslash, escape_map) {
+                        byteset_set(&mut quoted_bs, q as usize);
+                    }
+                    if has_fallback {
+                        let other = exprset.mk_literal(&format!("{:02x}", b));
+                        other_bytes.push(other);
+                        let other = exprset.mk_literal(&format!("{:02X}", b));
+                        other_bytes.push(other);
                     }
                 }
 
@@ -707,14 +716,14 @@ impl RegexBuilder {
                 exprset.mk_concat(backslash, quoted_or_other)
             };
 
-            let mut bs_without_ctrl = bs;
-            bs_without_ctrl[0] = 0;
+            let mut bs_passthrough = bs;
             let mut alts = vec![quoted];
-            if byteset_contains(&bs_without_ctrl, b'\\' as usize) && uses_backslash {
+            // Handle backslash and quote_char first (before clearing must-escape)
+            if byteset_contains(&bs_passthrough, b'\\' as usize) && uses_backslash {
                 alts.push(exprset.mk_literal("\\\\"));
-                byteset_clear(&mut bs_without_ctrl, b'\\' as usize);
+                byteset_clear(&mut bs_passthrough, b'\\' as usize);
             }
-            if byteset_contains(&bs_without_ctrl, qc as usize) {
+            if byteset_contains(&bs_passthrough, qc as usize) {
                 match options.quote_escape {
                     QuoteEscapeMethod::Backslash => {
                         let escaped = format!("\\{}", qc as char);
@@ -725,26 +734,44 @@ impl RegexBuilder {
                         alts.push(exprset.mk_literal(&doubled));
                     }
                 }
-                byteset_clear(&mut bs_without_ctrl, qc as usize);
+                byteset_clear(&mut bs_passthrough, qc as usize);
             }
-            if byteset_contains(&bs_without_ctrl, 0x7F) {
-                if has_fallback {
-                    match options.fallback_escape {
-                        FallbackEscapeFormat::UnicodeXXXX => {
-                            alts.push(exprset.mk_literal("\\u007F"));
-                            alts.push(exprset.mk_literal("\\u007f"));
-                        }
-                        FallbackEscapeFormat::HexHH => {
-                            alts.push(exprset.mk_literal("\\x7F"));
-                            alts.push(exprset.mk_literal("\\x7f"));
-                        }
-                        FallbackEscapeFormat::None => unreachable!(),
-                    }
+            // Handle must-escape bytes >= 0x20 that weren't covered by the
+            // control-char fast/slow paths (which only handle 0x00-0x1F)
+            for b in 0x20..=0xFFu8 {
+                if b == b'\\' || b == qc {
+                    continue; // already handled above
                 }
-                byteset_clear(&mut bs_without_ctrl, 0x7F);
+                if !byteset_contains(&bs_passthrough, b as usize)
+                    || !must_escape_set[b as usize]
+                {
+                    continue;
+                }
+                if let Some(q) = quote_single(b, qc, uses_backslash, escape_map) {
+                    let esc = exprset.mk_literal(&format!("\\{}", q as char));
+                    alts.push(esc);
+                }
+                if has_fallback {
+                    let lit_lower = format!("{:02x}", b);
+                    let lit_upper = format!("{:02X}", b);
+                    let prefix = match options.fallback_escape {
+                        FallbackEscapeFormat::UnicodeXXXX => "\\u00",
+                        FallbackEscapeFormat::HexHH => "\\x",
+                        FallbackEscapeFormat::None => unreachable!(),
+                    };
+                    alts.push(exprset.mk_literal(&format!("{}{}", prefix, lit_lower)));
+                    alts.push(exprset.mk_literal(&format!("{}{}", prefix, lit_upper)));
+                }
+                byteset_clear(&mut bs_passthrough, b as usize);
             }
-            let bs_without_ctrl = exprset.mk_byte_set(&bs_without_ctrl);
-            alts.push(bs_without_ctrl);
+            // Remove all remaining must-escape bytes from the pass-through set
+            for b in 0..=255u8 {
+                if must_escape_set[b as usize] {
+                    byteset_clear(&mut bs_passthrough, b as usize);
+                }
+            }
+            let bs_passthrough = exprset.mk_byte_set(&bs_passthrough);
+            alts.push(bs_passthrough);
             exprset.mk_or(&mut alts)
         }
 
