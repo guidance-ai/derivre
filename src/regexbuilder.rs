@@ -70,8 +70,10 @@ pub struct StringEscapeOptions {
     /// How the quote character itself is escaped.
     pub quote_escape: QuoteEscapeMethod,
 
-    /// Bytes that MUST be escaped. Backslash and `quote_char` are always
-    /// implicitly included regardless of this set.
+    /// Bytes that MUST be escaped. `quote_char` is always implicitly included.
+    /// Backslash is implicitly included when backslash escaping is active
+    /// (i.e., when `single_char_escapes` is non-empty, `fallback_escape` is
+    /// not `None`, or `quote_escape` is `Backslash`).
     pub must_escape: Vec<u8>,
 
     /// When true, `quote_char` delimiters are not added around the result.
