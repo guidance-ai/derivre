@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 
 use crate::HashMap;
 use anyhow::{ensure, Result};
@@ -19,26 +20,136 @@ use crate::{
 pub struct RegexBuilder {
     parser_builder: ParserBuilder,
     exprset: ExprSet,
-    json_quote_caches: HashMap<char, HashMap<ExprRef, ExprRef>>,
+    string_escape_caches: HashMap<StringEscapeOptions, HashMap<ExprRef, ExprRef>>,
+}
+
+/// Fallback escape format for bytes that need escaping but lack a single-char
+/// escape mapping.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FallbackEscapeFormat {
+    /// `\uXXXX` — JSON-style 4-digit hex (for bytes 0x00-0x7F)
+    UnicodeXXXX,
+    /// `\xHH` — 2-digit hex escape (Python, C, YAML double-quoted)
+    HexHH,
+    /// No fallback — bytes without single-char escapes that need escaping
+    /// will not be representable.
+    None,
+}
+
+/// How the quote character itself is escaped within the string.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum QuoteEscapeMethod {
+    /// Backslash-escape: `'` becomes `\'`, `"` becomes `\"`
+    Backslash,
+    /// Doubling: `'` becomes `''` (e.g. YAML single-quoted)
+    Doubling,
+}
+
+/// Declarative description of a string literal escape grammar.
+///
+/// This struct describes how bytes are escaped within a string literal for a
+/// given language/format. The [`RegexBuilder::string_escape`] method uses these
+/// options to transform a regex R into R' such that strings matching R', when
+/// unescaped, produce strings matching R.
+#[derive(Clone, Debug)]
+pub struct StringEscapeOptions {
+    /// Mappings from byte value to the character placed after the backslash.
+    /// For example, `(0x0A, b'n')` means byte 0x0A is escaped as `\n`.
+    /// Backslash and quote_char escaping are handled separately and should not
+    /// appear here.
+    pub single_char_escapes: Vec<(u8, u8)>,
+
+    /// Fallback escape for bytes in `must_escape` that have no single-char
+    /// mapping.
+    pub fallback_escape: FallbackEscapeFormat,
+
+    /// Character used to delimit the string (e.g., `'"'`, `'\''`).
+    pub quote_char: char,
+
+    /// How the quote character itself is escaped.
+    pub quote_escape: QuoteEscapeMethod,
+
+    /// Bytes that MUST be escaped. Backslash and `quote_char` are always
+    /// implicitly included regardless of this set.
+    pub must_escape: Vec<u8>,
+
+    /// When true, `quote_char` delimiters are not added around the result.
+    pub raw_mode: bool,
+}
+
+impl PartialEq for StringEscapeOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.quote_char == other.quote_char
+            && self.raw_mode == other.raw_mode
+            && self.quote_escape == other.quote_escape
+            && self.fallback_escape == other.fallback_escape
+            && self.single_char_escapes == other.single_char_escapes
+            && self.must_escape == other.must_escape
+    }
+}
+impl Eq for StringEscapeOptions {}
+
+impl Hash for StringEscapeOptions {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.quote_char.hash(state);
+        self.raw_mode.hash(state);
+        self.quote_escape.hash(state);
+        self.fallback_escape.hash(state);
+        self.single_char_escapes.hash(state);
+        self.must_escape.hash(state);
+    }
+}
+
+impl StringEscapeOptions {
+    /// Build options equivalent to JSON string escaping with `\uXXXX` fallback.
+    pub fn json() -> Self {
+        Self {
+            single_char_escapes: vec![
+                (0x08, b'b'),
+                (0x0C, b'f'),
+                (b'\n', b'n'),
+                (b'\r', b'r'),
+                (b'\t', b't'),
+            ],
+            fallback_escape: FallbackEscapeFormat::UnicodeXXXX,
+            quote_char: '"',
+            quote_escape: QuoteEscapeMethod::Backslash,
+            must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
+            raw_mode: false,
+        }
+    }
+
+    /// Build options for JSON without `\uXXXX` fallback, raw mode.
+    pub fn json_raw() -> Self {
+        Self {
+            single_char_escapes: vec![
+                (0x08, b'b'),
+                (0x0C, b'f'),
+                (b'\n', b'n'),
+                (b'\r', b'r'),
+                (b'\t', b't'),
+            ],
+            fallback_escape: FallbackEscapeFormat::None,
+            quote_char: '"',
+            quote_escape: QuoteEscapeMethod::Backslash,
+            must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
+            raw_mode: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct JsonQuoteOptions {
     /// Which escapes to allow (after \).
     /// Represents a set of bytes. Allowed bytes:
-    /// n, r, b, t, f, \, ", ', u
+    /// n, r, b, t, f, \, ", u
     /// Note that 'u' allows the \uXXXX form only for ASCII control
     /// characters, not general Unicode, in particular for characters
     /// \u0000-\u001F and \u007F (if they are allowed by the regex).
     pub allowed_escapes: String,
 
-    /// When set, the quote_char delimiters will not be added around the final
-    /// regular expression.
+    /// When set, "..." will not be added around the final regular expression.
     pub raw_mode: bool,
-
-    /// The character used for quoting strings. Defaults to `'"'` for JSON.
-    /// Set to `'\''` for Python single-quoted strings.
-    pub quote_char: char,
 }
 
 impl JsonQuoteOptions {
@@ -47,7 +158,6 @@ impl JsonQuoteOptions {
             // \uXXXX not allowed
             allowed_escapes: "nrbtf\\\"".to_string(),
             raw_mode: true,
-            quote_char: '"',
         }
     }
 
@@ -56,7 +166,6 @@ impl JsonQuoteOptions {
             // allow \uXXXX
             allowed_escapes: "nrbtf\\\"u".to_string(),
             raw_mode: true,
-            quote_char: '"',
         }
     }
 
@@ -65,7 +174,6 @@ impl JsonQuoteOptions {
             // allow \uXXXX
             allowed_escapes: "nrbtf\\\"u".to_string(),
             raw_mode: false,
-            quote_char: '"',
         }
     }
 
@@ -76,6 +184,38 @@ impl JsonQuoteOptions {
     pub fn set_if_allowed(&self, bs: &mut [u32], b: u8) {
         if self.is_allowed(b) {
             byteset_set(bs, b as usize);
+        }
+    }
+
+    /// Convert to a `StringEscapeOptions` for use with `string_escape`.
+    pub fn to_string_escape_options(&self) -> StringEscapeOptions {
+        let escape_map: &[(u8, u8, u8)] = &[
+            (b'b', 0x08, b'b'),
+            (b'f', 0x0C, b'f'),
+            (b'n', b'\n', b'n'),
+            (b'r', b'\r', b'r'),
+            (b't', b'\t', b't'),
+        ];
+
+        let single_char_escapes: Vec<(u8, u8)> = escape_map
+            .iter()
+            .filter(|(key, _, _)| self.is_allowed(*key))
+            .map(|(_, byte, esc)| (*byte, *esc))
+            .collect();
+
+        let fallback_escape = if self.is_allowed(b'u') {
+            FallbackEscapeFormat::UnicodeXXXX
+        } else {
+            FallbackEscapeFormat::None
+        };
+
+        StringEscapeOptions {
+            single_char_escapes,
+            fallback_escape,
+            quote_char: '"',
+            quote_escape: QuoteEscapeMethod::Backslash,
+            must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
+            raw_mode: self.raw_mode,
         }
     }
 }
@@ -310,7 +450,7 @@ impl RegexBuilder {
         Self {
             parser_builder: ParserBuilder::new(),
             exprset: ExprSet::new(256),
-            json_quote_caches: HashMap::default(),
+            string_escape_caches: HashMap::default(),
         }
     }
 
@@ -343,102 +483,181 @@ impl RegexBuilder {
     }
 
     pub fn json_quote(&mut self, e: ExprRef, options: &JsonQuoteOptions) -> Result<ExprRef> {
+        for c in options.allowed_escapes.as_bytes() {
+            ensure!(
+                b"\"\\bfnrtu".contains(c),
+                "invalid escape character in allowed_escapes: {}",
+                *c as char
+            );
+        }
+        let se_options = options.to_string_escape_options();
+        self.string_escape(e, &se_options)
+    }
+
+    pub fn string_escape(
+        &mut self,
+        e: ExprRef,
+        options: &StringEscapeOptions,
+    ) -> Result<ExprRef> {
         let qc = options.quote_char as u8;
 
-        // returns Some(X) iff b should be quoted as \X
-        fn quote(b: u8, qc: u8) -> Option<u8> {
+        // Build a lookup table: byte -> Some(escape_char) for single-char escapes
+        let mut escape_map = [None::<u8>; 256];
+        for &(byte, esc) in &options.single_char_escapes {
+            escape_map[byte as usize] = Some(esc);
+        }
+
+        // Build must_escape byteset (including implicit backslash + quote_char)
+        let mut must_escape_set = [false; 256];
+        for &b in &options.must_escape {
+            must_escape_set[b as usize] = true;
+        }
+        must_escape_set[b'\\' as usize] = true;
+        must_escape_set[qc as usize] = true;
+
+        let has_fallback = !matches!(options.fallback_escape, FallbackEscapeFormat::None);
+
+        // returns Some(X) iff b should be escaped as \X (single-char)
+        fn quote_single(b: u8, qc: u8, escape_map: &[Option<u8>; 256]) -> Option<u8> {
             match b {
                 b'\\' => Some(b'\\'),
                 c if c == qc => Some(c),
-                0x08 => Some(b'b'),
-                0x0C => Some(b'f'),
-                b'\n' => Some(b'n'),
-                b'\r' => Some(b'r'),
-                b'\t' => Some(b't'),
-                _ => None,
+                _ => escape_map[b as usize],
             }
         }
 
-        // byteset of all possible single-char quotes
-        fn single_quote_byteset(include_nl: bool, options: &JsonQuoteOptions) -> Vec<u32> {
-            let mut quoted_bs = byteset_256();
-            let qc = options.quote_char as u8;
-            for c in [qc, b'\\', b'b', b'f', b'r', b't'] {
-                options.set_if_allowed(&mut quoted_bs, c);
+        // Collect the set of escape chars that appear after backslash for
+        // single-char escapes (used to build regex byte sets).
+        fn single_escape_char_byteset(
+            include_nl_byte: bool,
+            qc: u8,
+            escape_map: &[Option<u8>; 256],
+            must_escape_set: &[bool; 256],
+        ) -> Vec<u32> {
+            let mut bs = byteset_256();
+            // Always include quote_char and backslash escape chars
+            byteset_set(&mut bs, qc as usize);
+            byteset_set(&mut bs, b'\\' as usize);
+            for b in 0..=255u8 {
+                if !must_escape_set[b as usize] {
+                    continue;
+                }
+                if b == b'\n' && !include_nl_byte {
+                    continue;
+                }
+                if let Some(esc) = escape_map[b as usize] {
+                    byteset_set(&mut bs, esc as usize);
+                }
             }
-            if include_nl {
-                options.set_if_allowed(&mut quoted_bs, b'n');
-            }
-            quoted_bs
+            bs
         }
 
-        // all hex digits, including A or not
-        fn hex_byteset(include_nl: bool) -> Vec<u32> {
+        // all hex digits, including A/a or not (for \n → 0x0a, which has 'a')
+        fn hex_byteset(include_a: bool) -> Vec<u32> {
             let mut hex_bs = byteset_256();
             for c in b"0123456789bcdefBCDEF" {
                 byteset_set(&mut hex_bs, *c as usize);
             }
-            if include_nl {
+            if include_a {
                 byteset_set(&mut hex_bs, b'A' as usize);
                 byteset_set(&mut hex_bs, b'a' as usize);
             }
             hex_bs
         }
 
-        // all control characters, including \n or not
+        // Build a regex for the fallback escape of all control-range bytes
+        fn mk_fallback_all_ctrl(
+            exprset: &mut ExprSet,
+            include_nl: bool,
+            options: &StringEscapeOptions,
+        ) -> ExprRef {
+            match options.fallback_escape {
+                FallbackEscapeFormat::UnicodeXXXX => {
+                    let upref = exprset.mk_literal("u00");
+                    if include_nl {
+                        let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
+                        let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
+                        exprset.mk_concat_vec(&[upref, hex0, hex1])
+                    } else {
+                        let n0 = exprset.mk_byte(b'0');
+                        let n1 = exprset.mk_byte(b'1');
+                        let hex0 = exprset.mk_byte_set(&hex_byteset(false));
+                        let hex0 = exprset.mk_concat(n0, hex0);
+                        let hex1 = exprset.mk_byte_set(&hex_byteset(true));
+                        let hex1 = exprset.mk_concat(n1, hex1);
+                        let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
+                        exprset.mk_concat(upref, hex01)
+                    }
+                }
+                FallbackEscapeFormat::HexHH => {
+                    let xpref = exprset.mk_literal("x");
+                    if include_nl {
+                        let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
+                        let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
+                        exprset.mk_concat_vec(&[xpref, hex0, hex1])
+                    } else {
+                        let n0 = exprset.mk_byte(b'0');
+                        let n1 = exprset.mk_byte(b'1');
+                        let hex0 = exprset.mk_byte_set(&hex_byteset(false));
+                        let hex0 = exprset.mk_concat(n0, hex0);
+                        let hex1 = exprset.mk_byte_set(&hex_byteset(true));
+                        let hex1 = exprset.mk_concat(n1, hex1);
+                        let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
+                        exprset.mk_concat(xpref, hex01)
+                    }
+                }
+                FallbackEscapeFormat::None => ExprRef::NO_MATCH,
+            }
+        }
+
+        // Build regex for escaping all control characters (0x00-0x1F range)
         fn quote_all_ctrl(
             exprset: &mut ExprSet,
             include_nl: bool,
-            options: &JsonQuoteOptions,
+            qc: u8,
+            escape_map: &[Option<u8>; 256],
+            must_escape_set: &[bool; 256],
+            options: &StringEscapeOptions,
         ) -> ExprRef {
-            let upref = exprset.mk_literal("u00");
             let backslash = exprset.mk_byte(b'\\');
-            let single_quote = exprset.mk_byte_set(&single_quote_byteset(include_nl, options));
-            let u0000 = if !options.is_allowed(b'u') {
-                ExprRef::NO_MATCH
-            } else if include_nl {
-                let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
-                let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
-                exprset.mk_concat_vec(&[upref, hex0, hex1])
-            } else {
-                let n0 = exprset.mk_byte(b'0');
-                let n1 = exprset.mk_byte(b'1');
-                let hex0 = exprset.mk_byte_set(&hex_byteset(false));
-                let hex0 = exprset.mk_concat(n0, hex0);
-                let hex1 = exprset.mk_byte_set(&hex_byteset(true));
-                let hex1 = exprset.mk_concat(n1, hex1);
-                let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
-                exprset.mk_concat(upref, hex01)
-            };
+            let single_esc = exprset.mk_byte_set(&single_escape_char_byteset(
+                include_nl,
+                qc,
+                escape_map,
+                must_escape_set,
+            ));
+            let fallback = mk_fallback_all_ctrl(exprset, include_nl, options);
 
-            let u_or_single = exprset.mk_or(&mut vec![u0000, single_quote]);
-            exprset.mk_concat(backslash, u_or_single)
+            let combined = exprset.mk_or(&mut vec![fallback, single_esc]);
+            exprset.mk_concat(backslash, combined)
         }
 
         fn quote_byteset(
             exprset: &mut ExprSet,
             bs: Vec<u32>,
-            options: &JsonQuoteOptions,
+            qc: u8,
+            escape_map: &[Option<u8>; 256],
+            must_escape_set: &[bool; 256],
+            has_fallback: bool,
+            options: &StringEscapeOptions,
         ) -> ExprRef {
-            let qc = options.quote_char as u8;
-            let upref = exprset.mk_literal("u00");
             let backslash = exprset.mk_byte(b'\\');
 
             let quoted = if bs[0] == !(1 << b'\n') {
                 // everything except for \n
-                quote_all_ctrl(exprset, false, options)
+                quote_all_ctrl(exprset, false, qc, escape_map, must_escape_set, options)
             } else if bs[0] == 0xffff_ffff {
                 // everything
-                quote_all_ctrl(exprset, true, options)
+                quote_all_ctrl(exprset, true, qc, escape_map, must_escape_set, options)
             } else {
                 let mut quoted_bs = byteset_256();
                 let mut other_bytes = vec![];
                 for b in 0..32 {
                     if byteset_contains(&bs, b) {
-                        if let Some(q) = quote(b as u8, qc) {
-                            options.set_if_allowed(&mut quoted_bs, q);
+                        if let Some(q) = quote_single(b as u8, qc, escape_map) {
+                            byteset_set(&mut quoted_bs, q as usize);
                         }
-                        if options.is_allowed(b'u') {
+                        if has_fallback {
                             let other = exprset.mk_literal(&format!("{:02x}", b));
                             other_bytes.push(other);
                             let other = exprset.mk_literal(&format!("{:02X}", b));
@@ -448,10 +667,20 @@ impl RegexBuilder {
                 }
 
                 let quoted_bs = exprset.mk_byte_set(&quoted_bs);
-                let other_bytes = exprset.mk_or(&mut other_bytes);
-                let other_bytes = exprset.mk_concat(upref, other_bytes);
 
-                let quoted_or_other = exprset.mk_or(&mut vec![quoted_bs, other_bytes]);
+                let fallback_part = if has_fallback {
+                    let other_bytes = exprset.mk_or(&mut other_bytes);
+                    let prefix = match options.fallback_escape {
+                        FallbackEscapeFormat::UnicodeXXXX => exprset.mk_literal("u00"),
+                        FallbackEscapeFormat::HexHH => exprset.mk_literal("x"),
+                        FallbackEscapeFormat::None => unreachable!(),
+                    };
+                    exprset.mk_concat(prefix, other_bytes)
+                } else {
+                    ExprRef::NO_MATCH
+                };
+
+                let quoted_or_other = exprset.mk_or(&mut vec![quoted_bs, fallback_part]);
                 exprset.mk_concat(backslash, quoted_or_other)
             };
 
@@ -459,22 +688,35 @@ impl RegexBuilder {
             bs_without_ctrl[0] = 0;
             let mut alts = vec![quoted];
             if byteset_contains(&bs_without_ctrl, b'\\' as usize) {
-                if options.is_allowed(b'\\') {
-                    alts.push(exprset.mk_literal("\\\\"));
-                }
+                alts.push(exprset.mk_literal("\\\\"));
                 byteset_clear(&mut bs_without_ctrl, b'\\' as usize);
             }
             if byteset_contains(&bs_without_ctrl, qc as usize) {
-                if options.is_allowed(qc) {
-                    let escaped = format!("\\{}", qc as char);
-                    alts.push(exprset.mk_literal(&escaped));
+                match options.quote_escape {
+                    QuoteEscapeMethod::Backslash => {
+                        let escaped = format!("\\{}", qc as char);
+                        alts.push(exprset.mk_literal(&escaped));
+                    }
+                    QuoteEscapeMethod::Doubling => {
+                        let doubled = format!("{}{}", qc as char, qc as char);
+                        alts.push(exprset.mk_literal(&doubled));
+                    }
                 }
                 byteset_clear(&mut bs_without_ctrl, qc as usize);
             }
             if byteset_contains(&bs_without_ctrl, 0x7F) {
-                if options.is_allowed(b'u') {
-                    alts.push(exprset.mk_literal("\\u007F"));
-                    alts.push(exprset.mk_literal("\\u007f"));
+                if has_fallback {
+                    match options.fallback_escape {
+                        FallbackEscapeFormat::UnicodeXXXX => {
+                            alts.push(exprset.mk_literal("\\u007F"));
+                            alts.push(exprset.mk_literal("\\u007f"));
+                        }
+                        FallbackEscapeFormat::HexHH => {
+                            alts.push(exprset.mk_literal("\\x7F"));
+                            alts.push(exprset.mk_literal("\\x7f"));
+                        }
+                        FallbackEscapeFormat::None => unreachable!(),
+                    }
                 }
                 byteset_clear(&mut bs_without_ctrl, 0x7F);
             }
@@ -483,19 +725,14 @@ impl RegexBuilder {
             exprset.mk_or(&mut alts)
         }
 
-        for c in options.allowed_escapes.as_bytes() {
-            ensure!(
-                b"\"'\\bfnrtu".contains(c),
-                "invalid escape character in allowed_escapes: {}",
-                *c as char
-            );
+        fn byte_needs_escape(b: u8, qc: u8, must_escape_set: &[bool; 256]) -> bool {
+            b == b'\\' || b == qc || must_escape_set[b as usize]
         }
 
-        fn byte_needs_quote(b: u8, qc: u8) -> bool {
-            b == b'\\' || b == qc || b == 0x7F || b < 0x20
-        }
-
-        let cache = self.json_quote_caches.entry(options.quote_char).or_default();
+        let cache = self
+            .string_escape_caches
+            .entry(options.clone())
+            .or_default();
         let r = self.exprset.map(
             e,
             cache,
@@ -504,35 +741,54 @@ impl RegexBuilder {
             |exprset, args, e| -> ExprRef {
                 match exprset.get(e) {
                     Expr::ByteSet(bs) => {
-                        let has_bytes_below_0x20 = bs[0] != 0;
-                        if has_bytes_below_0x20
-                            || byteset_contains(bs, b'\\' as usize)
-                            || byteset_contains(bs, qc as usize)
-                            || byteset_contains(bs, 0x7F)
-                        {
+                        // Check if any byte in the set needs escaping
+                        let needs = (0..=255u8).any(|b| {
+                            byteset_contains(bs, b as usize)
+                                && byte_needs_escape(b, qc, &must_escape_set)
+                        });
+                        if needs {
                             let bs = bs.to_vec();
-                            quote_byteset(exprset, bs, options)
+                            quote_byteset(
+                                exprset,
+                                bs,
+                                qc,
+                                &escape_map,
+                                &must_escape_set,
+                                has_fallback,
+                                options,
+                            )
                         } else {
-                            // no need to quote
                             e
                         }
                     }
                     Expr::Byte(b) => {
-                        if byte_needs_quote(b, qc) {
-                            quote_byteset(exprset, byteset_from_range(b, b), options)
+                        if byte_needs_escape(b, qc, &must_escape_set) {
+                            quote_byteset(
+                                exprset,
+                                byteset_from_range(b, b),
+                                qc,
+                                &escape_map,
+                                &must_escape_set,
+                                has_fallback,
+                                options,
+                            )
                         } else {
-                            // no need to quote
                             e
                         }
                     }
                     Expr::ByteConcat(_, bytes, args0) => {
-                        if bytes.iter().any(|b| byte_needs_quote(*b, qc)) {
+                        if bytes
+                            .iter()
+                            .any(|b| byte_needs_escape(*b, qc, &must_escape_set))
+                        {
                             let mut acc = vec![];
                             let mut idx = 0;
                             let bytes = bytes.to_vec();
                             while idx < bytes.len() {
                                 let idx0 = idx;
-                                while idx < bytes.len() && !byte_needs_quote(bytes[idx], qc) {
+                                while idx < bytes.len()
+                                    && !byte_needs_escape(bytes[idx], qc, &must_escape_set)
+                                {
                                     idx += 1;
                                 }
                                 let slice = &bytes[idx0..idx];
@@ -541,8 +797,15 @@ impl RegexBuilder {
                                 }
                                 if idx < bytes.len() {
                                     let b = bytes[idx];
-                                    let q =
-                                        quote_byteset(exprset, byteset_from_range(b, b), options);
+                                    let q = quote_byteset(
+                                        exprset,
+                                        byteset_from_range(b, b),
+                                        qc,
+                                        &escape_map,
+                                        &must_escape_set,
+                                        has_fallback,
+                                        options,
+                                    );
                                     ConcatElement::Expr(q).push_owned_to(&mut acc);
                                     idx += 1;
                                 }
@@ -570,11 +833,11 @@ impl RegexBuilder {
             },
         );
 
-        let quote_byte = self.exprset.mk_byte(qc);
+        let qc_byte = self.exprset.mk_byte(qc);
         let r = if options.raw_mode {
             r
         } else {
-            self.exprset.mk_concat_vec(&[quote_byte, r, quote_byte])
+            self.exprset.mk_concat_vec(&[qc_byte, r, qc_byte])
         };
         Ok(r)
     }

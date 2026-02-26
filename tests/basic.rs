@@ -1,4 +1,7 @@
-use derivre::{JsonQuoteOptions, NextByte, Regex, RegexAst, RegexBuilder};
+use derivre::{
+    FallbackEscapeFormat, JsonQuoteOptions, NextByte, QuoteEscapeMethod, Regex, RegexAst,
+    RegexBuilder, StringEscapeOptions,
+};
 
 fn check_is_match(rx: &mut Regex, s: &str, exp: bool) {
     if rx.is_match(s) == exp {
@@ -442,6 +445,153 @@ fn test_json_and() {
         &["foo\\n", "q\n", "foo\\u000a", "bar", "Baz", "QUX"],
     );
     match_many(&mut rx, &["foo", "fooo\\n", "baar"]);
+}
+
+#[test]
+fn test_string_escape_json_equiv() {
+    // Verify string_escape with JSON options produces identical results to json_quote
+    let mut b1 = RegexBuilder::new();
+    let mut b2 = RegexBuilder::new();
+    let json_opts = JsonQuoteOptions::with_unicode_raw();
+    let se_opts = json_opts.to_string_escape_options();
+
+    for rx in &[r#"[abc"]"#, r#"."#, r#".|\n"#, r#"\\"#, r#"""#] {
+        let e1 = b1.mk_regex(rx).unwrap();
+        let r1 = b1.json_quote(e1, &json_opts).unwrap();
+        let s1 = b1.exprset().expr_to_string(r1);
+
+        let e2 = b2.mk_regex(rx).unwrap();
+        let r2 = b2.string_escape(e2, &se_opts).unwrap();
+        let s2 = b2.exprset().expr_to_string(r2);
+
+        assert_eq!(s1, s2, "mismatch for regex {:?}", rx);
+    }
+}
+
+#[test]
+fn test_string_escape_hex_fallback() {
+    // Test HexHH fallback format (\xHH instead of \uXXXX)
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        single_char_escapes: vec![
+            (b'\n', b'n'),
+            (b'\r', b'r'),
+            (b'\t', b't'),
+        ],
+        fallback_escape: FallbackEscapeFormat::HexHH,
+        quote_char: '"',
+        quote_escape: QuoteEscapeMethod::Backslash,
+        must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
+        raw_mode: true,
+    };
+
+    // Control char 0x01 should be representable as \x01
+    let e = b.mk_regex(r#"\x01"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\x01", "\\x01"]);
+    no_match_many(&mut rx, &["\x01", "\\u0001"]);
+
+    // \x7F should work
+    let e = b.mk_regex(r#"\x7F"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\x7F", "\\x7f"]);
+    no_match_many(&mut rx, &["\x7F", "\\u007F"]);
+
+    // Regular chars pass through
+    let e = b.mk_regex(r#"[abc]"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["a", "b", "c"]);
+    no_match_many(&mut rx, &["A", "d"]);
+}
+
+#[test]
+fn test_string_escape_single_quote() {
+    // Test Python-style single-quoted strings with \xHH fallback
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        single_char_escapes: vec![
+            (0x07, b'a'),  // \a (bell)
+            (0x08, b'b'),  // \b (backspace)
+            (0x0C, b'f'),  // \f (form feed)
+            (b'\n', b'n'),
+            (b'\r', b'r'),
+            (b'\t', b't'),
+            (0x0B, b'v'),  // \v (vertical tab)
+        ],
+        fallback_escape: FallbackEscapeFormat::HexHH,
+        quote_char: '\'',
+        quote_escape: QuoteEscapeMethod::Backslash,
+        must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
+        raw_mode: false,
+    };
+
+    // A simple regex — result should be wrapped in single quotes
+    let e = b.mk_regex(r#"[a']"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["'a'", "'\\''"]);
+    no_match_many(&mut rx, &["a", "'", "'''", "'a"]);
+
+    // Bell character (0x07) should escape as \a
+    let e = b.mk_regex(r#"\x07"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let s = b.exprset().expr_to_string(r);
+    println!("bell escape: {}", s);
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["'\\a'"]);
+}
+
+#[test]
+fn test_string_escape_doubling() {
+    // Test YAML single-quoted style: ' is escaped as ''
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        single_char_escapes: vec![],
+        fallback_escape: FallbackEscapeFormat::None,
+        quote_char: '\'',
+        quote_escape: QuoteEscapeMethod::Doubling,
+        must_escape: vec![],  // only quote_char and backslash are implicitly escaped
+        raw_mode: false,
+    };
+
+    let e = b.mk_regex(r#"[a']"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    // 'a' matches; single quote must be doubled: ''''  (open-quote, doubled-quote, close-quote)
+    match_many(&mut rx, &["'a'", "''''"]);
+    no_match_many(&mut rx, &["a", "'\\''", "'"]);
+}
+
+#[test]
+fn test_string_escape_cache_correctness() {
+    // Different options for the same regex must produce different results
+    let mut b = RegexBuilder::new();
+
+    let opts_json = StringEscapeOptions::json();
+    let opts_hex = StringEscapeOptions {
+        fallback_escape: FallbackEscapeFormat::HexHH,
+        ..StringEscapeOptions::json()
+    };
+
+    let e = b.mk_regex(r#"\x01"#).unwrap();
+    let r_json = b.string_escape(e, &opts_json).unwrap();
+    let r_hex = b.string_escape(e, &opts_hex).unwrap();
+
+    let s_json = b.exprset().expr_to_string(r_json);
+    let s_hex = b.exprset().expr_to_string(r_hex);
+
+    // They should be different — one uses \u0001, the other \x01
+    assert_ne!(s_json, s_hex, "different options should produce different results");
+
+    // Verify each matches its expected format
+    let mut rx_json = b.to_regex(r_json);
+    match_(&mut rx_json, "\"\\u0001\"");
+
+    let mut rx_hex = b.to_regex(r_hex);
+    match_(&mut rx_hex, "\"\\x01\"");
 }
 
 fn mk_search_regex(rx: &str) -> Regex {
