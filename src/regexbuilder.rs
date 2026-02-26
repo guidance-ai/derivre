@@ -264,6 +264,8 @@ pub enum RegexAst {
     /// Quote the regex as a JSON string.
     /// For example, [A-Z\n]+ becomes ([A-Z]|\\n)+
     JsonQuote(Box<RegexAst>, JsonQuoteOptions),
+    /// Escape the regex as a string literal using configurable escape options.
+    StringEscape(Box<RegexAst>, StringEscapeOptions),
     /// Reference previously built regex
     ExprRef(ExprRef),
 }
@@ -281,7 +283,8 @@ impl RegexAst {
             RegexAst::LookAhead(ast)
             | RegexAst::Not(ast)
             | RegexAst::Repeat(ast, _, _)
-            | RegexAst::JsonQuote(ast, _) => std::slice::from_ref(ast),
+            | RegexAst::JsonQuote(ast, _)
+            | RegexAst::StringEscape(ast, _) => std::slice::from_ref(ast),
             RegexAst::EmptyString
             | RegexAst::MultipleOf(_, _)
             | RegexAst::NoMatch
@@ -314,6 +317,7 @@ impl RegexAst {
             RegexAst::ByteSet(_) => "ByteSet",
             RegexAst::MultipleOf(_, _) => "MultipleOf",
             RegexAst::JsonQuote(_, _) => "JsonQuote",
+            RegexAst::StringEscape(_, _) => "StringEscape",
         }
     }
 
@@ -379,6 +383,9 @@ impl RegexAst {
                     }
                 }
                 RegexAst::JsonQuote(_, opts) => {
+                    dst.push_str(&format!(" {:?}", opts));
+                }
+                RegexAst::StringEscape(_, opts) => {
                     dst.push_str(&format!(" {:?}", opts));
                 }
                 RegexAst::EmptyString | RegexAst::NoMatch => {}
@@ -926,6 +933,7 @@ impl RegexBuilder {
                     RegexAst::Regex(s) => self.mk_regex(s)?,
                     RegexAst::SearchRegex(s) => self.mk_regex_for_serach(s)?,
                     RegexAst::JsonQuote(_, opts) => self.json_quote(new_args[0], opts)?,
+                    RegexAst::StringEscape(_, opts) => self.string_escape(new_args[0], opts)?,
                     RegexAst::ExprRef(r) => {
                         ensure!(self.exprset.is_valid(*r), "invalid ref");
                         *r
