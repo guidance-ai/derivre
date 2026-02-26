@@ -494,11 +494,7 @@ impl RegexBuilder {
         self.string_escape(e, &se_options)
     }
 
-    pub fn string_escape(
-        &mut self,
-        e: ExprRef,
-        options: &StringEscapeOptions,
-    ) -> Result<ExprRef> {
+    pub fn string_escape(&mut self, e: ExprRef, options: &StringEscapeOptions) -> Result<ExprRef> {
         // Normalize Vec fields for consistent Hash/Eq cache behavior
         let mut options = options.clone();
         options.normalize();
@@ -515,7 +511,10 @@ impl RegexBuilder {
             for &b in &options.must_escape {
                 if b >= 0x80 {
                     ensure!(
-                        options.single_char_escapes.iter().any(|(byte, _)| *byte == b),
+                        options
+                            .single_char_escapes
+                            .iter()
+                            .any(|(byte, _)| *byte == b),
                         "UnicodeXXXX fallback cannot represent byte 0x{:02X} (>= 0x80); \
                          use HexHH or add a single_char_escape for it",
                         b
@@ -546,8 +545,6 @@ impl RegexBuilder {
             must_escape_set[b'\\' as usize] = true;
         }
         must_escape_set[qc as usize] = true;
-
-        let has_fallback = !matches!(options.fallback_escape, FallbackEscapeFormat::None);
 
         // returns Some(X) iff b should be escaped as \X (single-char)
         fn quote_single(
@@ -669,20 +666,36 @@ impl RegexBuilder {
             uses_backslash: bool,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
-            has_fallback: bool,
             options: &StringEscapeOptions,
         ) -> ExprRef {
+            let has_fallback = !matches!(options.fallback_escape, FallbackEscapeFormat::None);
             let backslash = exprset.mk_byte(b'\\');
 
             let used_fast_path;
             let quoted = if bs[0] == !(1 << b'\n') {
                 // everything except for \n
                 used_fast_path = true;
-                quote_all_ctrl(exprset, false, qc, uses_backslash, escape_map, must_escape_set, options)
+                quote_all_ctrl(
+                    exprset,
+                    false,
+                    qc,
+                    uses_backslash,
+                    escape_map,
+                    must_escape_set,
+                    options,
+                )
             } else if bs[0] == 0xffff_ffff {
                 // everything
                 used_fast_path = true;
-                quote_all_ctrl(exprset, true, qc, uses_backslash, escape_map, must_escape_set, options)
+                quote_all_ctrl(
+                    exprset,
+                    true,
+                    qc,
+                    uses_backslash,
+                    escape_map,
+                    must_escape_set,
+                    options,
+                )
             } else {
                 used_fast_path = false;
                 let mut quoted_bs = byteset_256();
@@ -789,7 +802,12 @@ impl RegexBuilder {
             exprset.mk_or(&mut alts)
         }
 
-        fn byte_needs_escape(b: u8, qc: u8, uses_backslash: bool, must_escape_set: &[bool; 256]) -> bool {
+        fn byte_needs_escape(
+            b: u8,
+            qc: u8,
+            uses_backslash: bool,
+            must_escape_set: &[bool; 256],
+        ) -> bool {
             (b == b'\\' && uses_backslash) || b == qc || must_escape_set[b as usize]
         }
 
@@ -820,7 +838,6 @@ impl RegexBuilder {
                                 uses_backslash,
                                 &escape_map,
                                 &must_escape_set,
-                                has_fallback,
                                 options,
                             )
                         } else {
@@ -836,7 +853,6 @@ impl RegexBuilder {
                                 uses_backslash,
                                 &escape_map,
                                 &must_escape_set,
-                                has_fallback,
                                 options,
                             )
                         } else {
@@ -854,7 +870,12 @@ impl RegexBuilder {
                             while idx < bytes.len() {
                                 let idx0 = idx;
                                 while idx < bytes.len()
-                                    && !byte_needs_escape(bytes[idx], qc, uses_backslash, &must_escape_set)
+                                    && !byte_needs_escape(
+                                        bytes[idx],
+                                        qc,
+                                        uses_backslash,
+                                        &must_escape_set,
+                                    )
                                 {
                                     idx += 1;
                                 }
@@ -871,7 +892,6 @@ impl RegexBuilder {
                                         uses_backslash,
                                         &escape_map,
                                         &must_escape_set,
-                                        has_fallback,
                                         options,
                                     );
                                     ConcatElement::Expr(q).push_owned_to(&mut acc);

@@ -473,11 +473,7 @@ fn test_string_escape_hex_fallback() {
     // Test HexHH fallback format (\xHH instead of \uXXXX)
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![
-            (b'\n', b'n'),
-            (b'\r', b'r'),
-            (b'\t', b't'),
-        ],
+        single_char_escapes: vec![(b'\n', b'n'), (b'\r', b'r'), (b'\t', b't')],
         fallback_escape: FallbackEscapeFormat::HexHH,
         quote_char: '"',
         quote_escape: QuoteEscapeMethod::Backslash,
@@ -513,13 +509,13 @@ fn test_string_escape_single_quote() {
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
         single_char_escapes: vec![
-            (0x07, b'a'),  // \a (bell)
-            (0x08, b'b'),  // \b (backspace)
-            (0x0C, b'f'),  // \f (form feed)
+            (0x07, b'a'), // \a (bell)
+            (0x08, b'b'), // \b (backspace)
+            (0x0C, b'f'), // \f (form feed)
             (b'\n', b'n'),
             (b'\r', b'r'),
             (b'\t', b't'),
-            (0x0B, b'v'),  // \v (vertical tab)
+            (0x0B, b'v'), // \v (vertical tab)
         ],
         fallback_escape: FallbackEscapeFormat::HexHH,
         quote_char: '\'',
@@ -591,7 +587,10 @@ fn test_string_escape_cache_correctness() {
     let s_hex = b.exprset().expr_to_string(r_hex);
 
     // They should be different — one uses \u0001, the other \x01
-    assert_ne!(s_json, s_hex, "different options should produce different results");
+    assert_ne!(
+        s_json, s_hex,
+        "different options should produce different results"
+    );
 
     // Verify each matches its expected format
     let mut rx_json = b.to_regex(r_json);
