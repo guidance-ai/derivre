@@ -601,6 +601,55 @@ fn test_string_escape_cache_correctness() {
     match_(&mut rx_hex, "\"\\x01\"");
 }
 
+#[test]
+fn test_string_escape_must_escape_high_byte() {
+    // must_escape byte 0x7F (DEL) with HexHH fallback — tests the >= 0x20 path
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        single_char_escapes: vec![],
+        fallback_escape: FallbackEscapeFormat::HexHH,
+        quote_char: '"',
+        quote_escape: QuoteEscapeMethod::Backslash,
+        must_escape: vec![0x7F],
+        raw_mode: true,
+    };
+    let e = b.mk_regex(r#"\x7F"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\x7F", "\\x7f"]);
+    no_match_many(&mut rx, &["\x7F"]);
+}
+
+#[test]
+fn test_string_escape_unicode_rejects_high_byte() {
+    // UnicodeXXXX fallback must reject must_escape bytes >= 0x80
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        single_char_escapes: vec![],
+        fallback_escape: FallbackEscapeFormat::UnicodeXXXX,
+        quote_char: '"',
+        quote_escape: QuoteEscapeMethod::Backslash,
+        must_escape: vec![0x80],
+        raw_mode: true,
+    };
+    let e = b.mk_regex(r#"\x80"#).unwrap();
+    assert!(b.string_escape(e, &opts).is_err());
+}
+
+#[test]
+fn test_string_escape_control_only_regex() {
+    // Regex matching only control characters — tests the fast path
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions::json();
+    let e = b.mk_regex(r#"[\x00-\x1F]"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    // Should match escaped control chars
+    match_many(&mut rx, &["\"\\n\"", "\"\\t\"", "\"\\u0001\""]);
+    // Should not match printable chars or unescaped controls
+    no_match_many(&mut rx, &["\"a\"", "\"\x01\""]);
+}
+
 fn mk_search_regex(rx: &str) -> Regex {
     let mut b = RegexBuilder::new();
     let e0 = b.mk_regex_for_serach(rx).unwrap();
