@@ -80,7 +80,6 @@ impl ExprSet {
                     } else {
                         args.extend_from_slice(self.get_args(a));
                     }
-                    i += 1;
                 }
                 return;
             }
