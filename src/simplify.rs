@@ -540,14 +540,14 @@ impl ExprSet {
         }
     }
 
-    pub fn iter_concat(&self, root: ExprRef) -> ConcatIter {
+    pub fn iter_concat(&self, root: ExprRef) -> ConcatIter<'_> {
         ConcatIter {
             exprs: self,
             current: Some(root),
         }
     }
 
-    pub fn iter_concat_bytes(&self, root: ExprRef) -> ConcatByteIter {
+    pub fn iter_concat_bytes(&self, root: ExprRef) -> ConcatByteIter<'_> {
         ConcatByteIter {
             exprs: self,
             pointer: ConcatBytePointer::new(root),
