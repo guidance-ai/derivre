@@ -24,25 +24,31 @@ pub struct RegexBuilder {
     json_quote_options_cache: HashMap<JsonQuoteOptions, StringEscapeOptions>,
 }
 
-/// Fallback escape format for bytes that need escaping but lack a single-char
-/// escape mapping.
+/// Fallback escape format for bytes in [`StringEscapeOptions::must_escape`]
+/// that have no entry in [`StringEscapeOptions::single_char_escapes`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FallbackEscapeFormat {
-    /// `\uXXXX` — JSON-style 4-digit hex (for bytes 0x00-0x7F)
+    /// `\uXXXX` — JSON-style 4-digit Unicode escape.
+    /// Only valid for bytes 0x00–0x7F; returns an error for higher bytes
+    /// unless they have a single-char escape mapping.
     UnicodeXXXX,
-    /// `\xHH` — 2-digit hex escape (Python, C, YAML double-quoted)
+    /// `\xHH` — 2-digit hex escape (Python, C, YAML double-quoted).
+    /// Works for any byte 0x00–0xFF.
     HexHH,
-    /// No fallback — bytes without single-char escapes that need escaping
-    /// will not be representable.
+    /// No fallback — must-escape bytes without a single-char mapping will
+    /// be excluded from the output regex.
     None,
 }
 
 /// How the quote character itself is escaped within the string.
+///
+/// Also affects whether backslash is treated as an escape prefix;
+/// see [`StringEscapeOptions`] for the full rules.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum QuoteEscapeMethod {
-    /// Backslash-escape: `'` becomes `\'`, `"` becomes `\"`
+    /// Backslash-escape: `'` → `\'`, `"` → `\"`.
     Backslash,
-    /// Doubling: `'` becomes `''` (e.g. YAML single-quoted)
+    /// Doubling: `'` → `''` (e.g., YAML single-quoted strings).
     Doubling,
 }
 
@@ -51,45 +57,71 @@ pub enum QuoteEscapeMethod {
 /// This struct describes how bytes are escaped within a string literal for a
 /// given language/format. The [`RegexBuilder::string_escape`] method uses these
 /// options to transform a regex R into R' such that strings matching R', when
-/// unescaped, produce strings matching R.
+/// unescaped according to this grammar, produce strings matching R.
+///
+/// # Backslash handling
+///
+/// Backslash (`\`) is treated as an escape prefix whenever any of the
+/// following are true:
+/// - [`single_char_escapes`](Self::single_char_escapes) is non-empty
+/// - [`fallback_escape`](Self::fallback_escape) is not
+///   [`None`](FallbackEscapeFormat::None)
+/// - [`quote_escape`](Self::quote_escape) is
+///   [`Backslash`](QuoteEscapeMethod::Backslash)
+///
+/// When backslash is an escape prefix, it is implicitly added to the set of
+/// bytes that must be escaped (a literal `\` in the input becomes `\\` in
+/// the output). When none of the above conditions hold (e.g., pure
+/// [`Doubling`](QuoteEscapeMethod::Doubling) with no other escapes),
+/// backslash passes through as a literal character.
+///
+/// # Normalization
+///
+/// The [`single_char_escapes`](Self::single_char_escapes) and
+/// [`must_escape`](Self::must_escape) fields are sorted and deduplicated
+/// before use, so insertion order does not affect behavior or caching.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StringEscapeOptions {
     /// Mappings from byte value to the character placed after the backslash.
     /// For example, `(0x0A, b'n')` means byte 0x0A is escaped as `\n`.
-    /// Backslash and quote_char escaping are handled separately and should not
-    /// appear here.
+    /// Backslash and quote_char need not be listed (handled implicitly);
+    /// including them is harmless but redundant.
     pub single_char_escapes: Vec<(u8, u8)>,
 
-    /// Fallback escape for bytes in `must_escape` that have no single-char
-    /// mapping.
+    /// How to escape must-escape bytes that have no single-char mapping.
     pub fallback_escape: FallbackEscapeFormat,
 
-    /// Character used to delimit the string (e.g., `'"'`, `'\''`).
+    /// ASCII character used to delimit the string (e.g., `'"'`, `'\''`).
     pub quote_char: char,
 
-    /// How the quote character itself is escaped.
+    /// How the quote character itself is escaped inside the string body.
     pub quote_escape: QuoteEscapeMethod,
 
-    /// Bytes that MUST be escaped. `quote_char` is always implicitly included.
-    /// Backslash is implicitly included when backslash escaping is active
-    /// (i.e., when `single_char_escapes` is non-empty, `fallback_escape` is
-    /// not `None`, or `quote_escape` is `Backslash`).
+    /// Bytes that MUST be escaped in the string body. `quote_char` and
+    /// (when applicable) backslash are added implicitly.
+    /// Bytes with neither a single-char mapping nor a fallback format
+    /// will be silently excluded from the output regex.
     pub must_escape: Vec<u8>,
 
     /// When true, `quote_char` delimiters are not added around the result.
+    /// The quote character is still escaped if it appears in the regex.
     pub raw_mode: bool,
 }
 
 impl StringEscapeOptions {
-    /// Sort and deduplicate Vec fields so that Hash/Eq are order-independent
-    /// across differently-constructed instances with the same logical content.
+    /// Sort and deduplicate `single_char_escapes` and `must_escape`.
+    /// Called automatically by [`RegexBuilder::string_escape`].
     pub fn normalize(&mut self) {
         self.single_char_escapes.sort();
         self.single_char_escapes.dedup();
         self.must_escape.sort();
         self.must_escape.dedup();
     }
-    /// Build options equivalent to JSON string escaping with `\uXXXX` fallback.
+    /// Build options equivalent to JSON string escaping (RFC 8259).
+    ///
+    /// Uses `\uXXXX` fallback, double-quote delimiter, backslash escaping,
+    /// and single-char escapes for `\b`, `\f`, `\n`, `\r`, `\t`.
+    /// Control characters 0x00–0x1F and 0x7F are in `must_escape`.
     pub fn json() -> Self {
         Self {
             single_char_escapes: vec![
@@ -107,7 +139,12 @@ impl StringEscapeOptions {
         }
     }
 
-    /// Build options for JSON without `\uXXXX` fallback, raw mode.
+    /// Build options for JSON without `\uXXXX` fallback, in raw mode.
+    ///
+    /// Same as [`json()`](Self::json) but with
+    /// [`FallbackEscapeFormat::None`] and `raw_mode: true`. Bytes that
+    /// lack a single-char escape mapping (e.g., 0x01) cannot be represented
+    /// and will be excluded from the output regex.
     pub fn json_raw() -> Self {
         Self {
             single_char_escapes: vec![
@@ -126,17 +163,20 @@ impl StringEscapeOptions {
     }
 }
 
+/// Options for JSON string quoting (legacy API).
+///
+/// Internally converted to [`StringEscapeOptions`] and delegated to
+/// [`RegexBuilder::string_escape`]. Backslash and double-quote escaping
+/// are always enabled regardless of `allowed_escapes`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct JsonQuoteOptions {
-    /// Which escapes to allow (after \).
-    /// Represents a set of bytes. Allowed bytes:
-    /// n, r, b, t, f, \, ", u
-    /// Note that 'u' allows the \uXXXX form only for ASCII control
-    /// characters, not general Unicode, in particular for characters
-    /// \u0000-\u001F and \u007F (if they are allowed by the regex).
+    /// Which escape forms to allow (each char enables one):
+    /// `n`, `r`, `b`, `t`, `f` — single-char control escapes;
+    /// `u` — `\uXXXX` for 0x00–0x1F and 0x7F;
+    /// `\`, `"` — accepted but have no effect (always enabled).
     pub allowed_escapes: String,
 
-    /// When set, "..." will not be added around the final regular expression.
+    /// When true, the wrapping `"..."` delimiters are omitted.
     pub raw_mode: bool,
 }
 
@@ -175,7 +215,10 @@ impl JsonQuoteOptions {
         }
     }
 
-    /// Convert to a `StringEscapeOptions` for use with `string_escape`.
+    /// Convert to [`StringEscapeOptions`].
+    ///
+    /// The `\\` and `"` entries in `allowed_escapes` are ignored; backslash
+    /// and double-quote escaping are always enabled in the result.
     pub fn to_string_escape_options(&self) -> StringEscapeOptions {
         let escape_map: &[(u8, u8, u8)] = &[
             (b'b', 0x08, b'b'),
@@ -250,9 +293,18 @@ pub enum RegexAst {
     /// Can lead to invalid utf8 if the set is not a subset of 0..127
     ByteSet(Vec<u32>),
     /// Quote the regex as a JSON string.
-    /// For example, [A-Z\n]+ becomes ([A-Z]|\\n)+
+    /// For example, `[A-Z\n]+` becomes `([A-Z]|\\n)+`.
+    ///
+    /// Delegates to [`StringEscape`](RegexAst::StringEscape) via
+    /// [`RegexBuilder::string_escape`]. See [`StringEscapeOptions`] for
+    /// the full escape model.
     JsonQuote(Box<RegexAst>, JsonQuoteOptions),
     /// Escape the regex as a string literal using configurable escape options.
+    ///
+    /// Transforms a regex R into R' such that strings matching R', when
+    /// unescaped according to the given [`StringEscapeOptions`], produce
+    /// strings matching R. See [`StringEscapeOptions`] for the full
+    /// escape model and configuration.
     StringEscape(Box<RegexAst>, StringEscapeOptions),
     /// Reference previously built regex
     ExprRef(ExprRef),
@@ -478,6 +530,10 @@ impl RegexBuilder {
         self.exprset.reserve(size);
     }
 
+    /// Transform a regex for JSON string quoting.
+    ///
+    /// Converts `options` to [`StringEscapeOptions`] and delegates to
+    /// [`string_escape`](Self::string_escape).
     pub fn json_quote(&mut self, e: ExprRef, options: &JsonQuoteOptions) -> Result<ExprRef> {
         for c in options.allowed_escapes.as_bytes() {
             ensure!(
@@ -494,6 +550,10 @@ impl RegexBuilder {
         self.string_escape(e, &se_options)
     }
 
+    /// Transform a regex for string-literal escaping.
+    ///
+    /// Given regex R, produces R' such that strings matching R', when
+    /// unescaped according to the given grammar, yield strings matching R.
     pub fn string_escape(&mut self, e: ExprRef, options: &StringEscapeOptions) -> Result<ExprRef> {
         // Normalize Vec fields for consistent Hash/Eq cache behavior
         let mut options = options.clone();
@@ -570,15 +630,11 @@ impl RegexBuilder {
             must_escape_set: &[bool; 256],
         ) -> Vec<u32> {
             let mut bs = byteset_256();
-            // Only add qc/backslash if they fall in the control range (< 0x20),
-            // since this byteset is used by the fast path that handles 0x00-0x1F.
-            if uses_backslash {
-                if qc < 0x20 {
-                    byteset_set(&mut bs, qc as usize);
-                }
-                if b'\\' < 0x20 {
-                    byteset_set(&mut bs, b'\\' as usize);
-                }
+            // qc might be a control char (< 0x20); if so, include its escape
+            // char in this byteset since it's in the fast-path control range.
+            // Backslash (0x5C) is never < 0x20, so no action needed for it.
+            if uses_backslash && qc < 0x20 {
+                byteset_set(&mut bs, qc as usize);
             }
             for b in 0..=255u8 {
                 if !must_escape_set[b as usize] {
