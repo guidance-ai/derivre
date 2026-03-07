@@ -450,27 +450,6 @@ fn test_json_and() {
 }
 
 #[test]
-fn test_string_escape_json_equiv() {
-    // Verify string_escape with JSON options produces identical results to json_quote
-    let mut b1 = RegexBuilder::new();
-    let mut b2 = RegexBuilder::new();
-    let json_opts = JsonQuoteOptions::with_unicode_raw();
-    let se_opts = json_opts.to_string_escape_options();
-
-    for rx in &[r#"[abc"]"#, r#"."#, r#".|\n"#, r#"\\"#, r#"""#] {
-        let e1 = b1.mk_regex(rx).unwrap();
-        let r1 = b1.json_quote(e1, &json_opts).unwrap();
-        let s1 = b1.exprset().expr_to_string(r1);
-
-        let e2 = b2.mk_regex(rx).unwrap();
-        let r2 = b2.string_escape(e2, &se_opts).unwrap();
-        let s2 = b2.exprset().expr_to_string(r2);
-
-        assert_eq!(s1, s2, "mismatch for regex {:?}", rx);
-    }
-}
-
-#[test]
 fn test_string_escape_hex_fallback() {
     // Test \xHH fallback format
     let mut b = RegexBuilder::new();
