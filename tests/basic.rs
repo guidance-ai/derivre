@@ -1,6 +1,4 @@
-use derivre::{
-    JsonQuoteOptions, NextByte, Regex, RegexAst, RegexBuilder, StringEscapeOptions,
-};
+use derivre::{JsonQuoteOptions, NextByte, Regex, RegexAst, RegexBuilder, StringEscapeOptions};
 
 fn check_is_match(rx: &mut Regex, s: &str, exp: bool) {
     if rx.is_match(s) == exp {
@@ -412,10 +410,8 @@ fn test_json_uxxxx() {
             // Any must-escape byte with a \uXXXX fallback should match.
             // must_escape for JSON: 0x00-0x1F, 0x22 ("), 0x5C (\), 0x7F.
             // \n (0x0A) is excluded because `.` doesn't match newline.
-            let is_must_escape = (0x0000..=0x001f).contains(&x)
-                || x == 0x0022
-                || x == 0x005c
-                || x == 0x007f;
+            let is_must_escape =
+                (0x0000..=0x001f).contains(&x) || x == 0x0022 || x == 0x005c || x == 0x007f;
             if is_must_escape && x != 0x000a {
                 match_(&mut rx, s);
             } else {
@@ -564,9 +560,7 @@ fn test_string_escape_doubling() {
     // Test YAML single-quoted style: ' is escaped as ''
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        escape_sequences: vec![
-            (b'\'', b"''".to_vec()),
-        ],
+        escape_sequences: vec![(b'\'', b"''".to_vec())],
         fallback_prefix: None,
         max_fallback_byte: None,
         must_escape: vec![b'\''],
@@ -732,9 +726,7 @@ fn test_string_escape_no_quote_special() {
     // Quote char escaped via fallback, not specially
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        escape_sequences: vec![
-            (b'\\', b"\\\\".to_vec()),
-        ],
+        escape_sequences: vec![(b'\\', b"\\\\".to_vec())],
         fallback_prefix: Some(b"\\x".to_vec()),
         max_fallback_byte: None,
         must_escape: vec![b'"', b'\\'],
@@ -808,9 +800,7 @@ fn test_string_escape_unrepresentable() {
     // it cannot be represented and is excluded from the output regex.
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        escape_sequences: vec![
-            (b'\n', b"\\n".to_vec()),
-        ],
+        escape_sequences: vec![(b'\n', b"\\n".to_vec())],
         fallback_prefix: None,
         max_fallback_byte: None,
         must_escape: (0x00..=0x1Fu8).collect(),

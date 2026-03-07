@@ -540,13 +540,16 @@ impl RegexBuilder {
         options.normalize();
 
         // Validate max_fallback_byte
-        if let (Some(_prefix), Some(max_byte)) = (&options.fallback_prefix, options.max_fallback_byte) {
+        if let (Some(_prefix), Some(max_byte)) =
+            (&options.fallback_prefix, options.max_fallback_byte)
+        {
             for &b in &options.must_escape {
                 if b > max_byte && !options.escape_sequences.iter().any(|(byte, _)| *byte == b) {
                     anyhow::bail!(
                         "fallback cannot represent byte 0x{:02X} (max 0x{:02X}); \
                          add an explicit escape_sequence for it",
-                        b, max_byte
+                        b,
+                        max_byte
                     );
                 }
             }
@@ -625,7 +628,10 @@ impl RegexBuilder {
             exprset.mk_or(&mut alts)
         }
 
-        let cache = self.string_escape_caches.entry(options.clone()).or_default();
+        let cache = self
+            .string_escape_caches
+            .entry(options.clone())
+            .or_default();
         let r = self.exprset.map(
             e,
             cache,
