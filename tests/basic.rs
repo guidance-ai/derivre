@@ -533,9 +533,7 @@ fn test_string_escape_single_quote() {
         ],
         fallback_prefix: Some(b"\\x".to_vec()),
         max_fallback_byte: None,
-        must_escape: (0x00..=0x1Fu8)
-            .chain([b'\\', b'\'', 0x7F].into_iter())
-            .collect(),
+        must_escape: (0x00..=0x1Fu8).chain([b'\\', b'\'', 0x7F]).collect(),
     };
 
     // A simple regex — no wrapping
@@ -606,9 +604,7 @@ fn test_string_escape_cache_correctness() {
         ],
         fallback_prefix: Some(b"\\x".to_vec()),
         max_fallback_byte: None,
-        must_escape: (0x00..=0x1Fu8)
-            .chain([b'\\', b'"', 0x7F].into_iter())
-            .collect(),
+        must_escape: (0x00..=0x1Fu8).chain([b'\\', b'"', 0x7F]).collect(),
     };
 
     let e = b.mk_regex(r#"\x01"#).unwrap();

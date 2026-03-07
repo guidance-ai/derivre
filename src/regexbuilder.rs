@@ -99,9 +99,7 @@ impl StringEscapeOptions {
             ],
             fallback_prefix: Some(b"\\u00".to_vec()),
             max_fallback_byte: Some(0x7F),
-            must_escape: (0x00..=0x1Fu8)
-                .chain([b'\\', b'"', 0x7F].into_iter())
-                .collect(),
+            must_escape: (0x00..=0x1Fu8).chain([b'\\', b'"', 0x7F]).collect(),
         }
     }
 
@@ -125,7 +123,7 @@ impl StringEscapeOptions {
         let unreserved: Vec<u8> = (b'A'..=b'Z')
             .chain(b'a'..=b'z')
             .chain(b'0'..=b'9')
-            .chain([b'-', b'.', b'_', b'~'].into_iter())
+            .chain([b'-', b'.', b'_', b'~'])
             .collect();
         let must_escape: Vec<u8> = (0x00..=0xFFu8)
             .filter(|b| !unreserved.contains(b))
@@ -219,9 +217,7 @@ impl JsonQuoteOptions {
             escape_sequences,
             fallback_prefix,
             max_fallback_byte,
-            must_escape: (0x00..=0x1Fu8)
-                .chain([b'\\', b'"', 0x7F].into_iter())
-                .collect(),
+            must_escape: (0x00..=0x1Fu8).chain([b'\\', b'"', 0x7F]).collect(),
         }
     }
 }
