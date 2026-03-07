@@ -31,8 +31,15 @@ pub struct RegexBuilder {
 /// options to transform a regex R into R' such that strings matching R', when
 /// unescaped according to this grammar, produce strings matching R.
 ///
-/// Delimiter wrapping (e.g., surrounding with `"`) is NOT handled by this
-/// struct — that is the caller's responsibility.
+/// Each byte in [`must_escape`](Self::must_escape) is represented by its
+/// [`escape_sequences`](Self::escape_sequences) entry and/or its
+/// [`fallback_prefix`](Self::fallback_prefix)`+HH` hex form. When both
+/// exist, both are accepted (e.g., JSON `\b` and `\u0008` are both valid
+/// for byte 0x08). Must-escape bytes with neither form are excluded from
+/// the output regex — the byte simply cannot be represented.
+///
+/// Delimiter wrapping (e.g., surrounding with `"`) is NOT handled here;
+/// that is the caller's responsibility.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StringEscapeOptions {
     /// Explicit escape sequences for specific bytes.
