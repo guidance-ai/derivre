@@ -1,6 +1,5 @@
 use derivre::{
-    FallbackEscapeFormat, JsonQuoteOptions, NextByte, QuoteEscapeMethod, Regex, RegexAst,
-    RegexBuilder, StringEscapeOptions,
+    JsonQuoteOptions, NextByte, Regex, RegexAst, RegexBuilder, StringEscapeOptions,
 };
 
 fn check_is_match(rx: &mut Regex, s: &str, exp: bool) {
@@ -410,9 +409,14 @@ fn test_json_uxxxx() {
     let mut rx = b.to_regex(e);
     for x in 0..=0xffff {
         for s in &[format!("\\u{:04X}", x), format!("\\u{:04x}", x)] {
-            // 0x00-0x1F (except \n) and 0x7F are control chars that must be escaped;
-            // 0x5C (backslash) is the escape prefix and also has a \uXXXX fallback.
-            if x == 0x007f || x == 0x005c || ((0x0000..=0x001f).contains(&x) && x != 0x000a) {
+            // Any must-escape byte with a \uXXXX fallback should match.
+            // must_escape for JSON: 0x00-0x1F, 0x22 ("), 0x5C (\), 0x7F.
+            // \n (0x0A) is excluded because `.` doesn't match newline.
+            let is_must_escape = (0x0000..=0x001f).contains(&x)
+                || x == 0x0022
+                || x == 0x005c
+                || x == 0x007f;
+            if is_must_escape && x != 0x000a {
                 match_(&mut rx, s);
             } else {
                 no_match(&mut rx, s);
@@ -472,16 +476,17 @@ fn test_string_escape_json_equiv() {
 
 #[test]
 fn test_string_escape_hex_fallback() {
-    // Test HexHH fallback format (\xHH instead of \uXXXX)
+    // Test \xHH fallback format
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![(b'\n', b'n'), (b'\r', b'r'), (b'\t', b't'), (b'\\', b'\\')],
-        fallback_escape: FallbackEscapeFormat::HexHH,
-        escape_prefix: b'\\',
-        quote_char: '"',
-        quote_escape: QuoteEscapeMethod::Backslash,
+        escape_sequences: vec![
+            (b'\n', b"\\n".to_vec()),
+            (b'\r', b"\\r".to_vec()),
+            (b'\t', b"\\t".to_vec()),
+        ],
+        fallback_prefix: Some(b"\\x".to_vec()),
+        max_fallback_byte: None,
         must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
-        raw_mode: true,
     };
 
     // Control char 0x01 should be representable as \x01
@@ -511,30 +516,30 @@ fn test_string_escape_single_quote() {
     // Test Python-style single-quoted strings with \xHH fallback
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![
-            (0x07, b'a'), // \a (bell)
-            (0x08, b'b'), // \b (backspace)
-            (0x0C, b'f'), // \f (form feed)
-            (b'\n', b'n'),
-            (b'\r', b'r'),
-            (b'\t', b't'),
-            (0x0B, b'v'), // \v (vertical tab)
-            (b'\\', b'\\'),
+        escape_sequences: vec![
+            (0x07, b"\\a".to_vec()),
+            (0x08, b"\\b".to_vec()),
+            (0x0C, b"\\f".to_vec()),
+            (b'\n', b"\\n".to_vec()),
+            (b'\r', b"\\r".to_vec()),
+            (b'\t', b"\\t".to_vec()),
+            (0x0B, b"\\v".to_vec()),
+            (b'\\', b"\\\\".to_vec()),
+            (b'\'', b"\\'".to_vec()),
         ],
-        fallback_escape: FallbackEscapeFormat::HexHH,
-        escape_prefix: b'\\',
-        quote_char: '\'',
-        quote_escape: QuoteEscapeMethod::Backslash,
-        must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
-        raw_mode: false,
+        fallback_prefix: Some(b"\\x".to_vec()),
+        max_fallback_byte: None,
+        must_escape: (0x00..=0x1Fu8)
+            .chain([b'\\', b'\'', 0x7F].into_iter())
+            .collect(),
     };
 
-    // A simple regex — result should be wrapped in single quotes
+    // A simple regex — no wrapping
     let e = b.mk_regex(r#"[a']"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    match_many(&mut rx, &["'a'", "'\\''"]);
-    no_match_many(&mut rx, &["a", "'", "'''", "'a"]);
+    match_many(&mut rx, &["a", "\\'"]);
+    no_match_many(&mut rx, &["'", "\\\\'"]);
 
     // Bell character (0x07) should escape as \a
     let e = b.mk_regex(r#"\x07"#).unwrap();
@@ -542,7 +547,7 @@ fn test_string_escape_single_quote() {
     let s = b.exprset().expr_to_string(r);
     println!("bell escape: {}", s);
     let mut rx = b.to_regex(r);
-    match_many(&mut rx, &["'\\a'"]);
+    match_many(&mut rx, &["\\a"]);
 }
 
 #[test]
@@ -550,28 +555,27 @@ fn test_string_escape_doubling() {
     // Test YAML single-quoted style: ' is escaped as ''
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![],
-        fallback_escape: FallbackEscapeFormat::None,
-        escape_prefix: b'\\',
-        quote_char: '\'',
-        quote_escape: QuoteEscapeMethod::Doubling,
-        must_escape: vec![],
-        raw_mode: false,
+        escape_sequences: vec![
+            (b'\'', b"''".to_vec()),
+        ],
+        fallback_prefix: None,
+        max_fallback_byte: None,
+        must_escape: vec![b'\''],
     };
 
     let e = b.mk_regex(r#"[a']"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    // 'a' matches; single quote must be doubled: ''''  (open-quote, doubled-quote, close-quote)
-    match_many(&mut rx, &["'a'", "''''"]);
-    no_match_many(&mut rx, &["a", "'\\''", "'"]);
+    // 'a' passes through, single quote becomes ''
+    match_many(&mut rx, &["a", "''"]);
+    no_match_many(&mut rx, &["'", "\\''"]);
 
     // Backslash is literal in YAML single-quoted mode — not an escape prefix
     let e = b.mk_regex(r#"[a\\]"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    match_many(&mut rx, &["'a'", "'\\'"]); // literal backslash, not escaped
-    no_match_many(&mut rx, &["'\\\\'"]); // double-backslash should NOT match
+    match_many(&mut rx, &["a", "\\"]); // literal backslash, not escaped
+    no_match_many(&mut rx, &["\\\\"]); // double-backslash should NOT match
 }
 
 #[test]
@@ -581,8 +585,20 @@ fn test_string_escape_cache_correctness() {
 
     let opts_json = StringEscapeOptions::json();
     let opts_hex = StringEscapeOptions {
-        fallback_escape: FallbackEscapeFormat::HexHH,
-        ..StringEscapeOptions::json()
+        escape_sequences: vec![
+            (0x08, b"\\b".to_vec()),
+            (0x0C, b"\\f".to_vec()),
+            (b'\n', b"\\n".to_vec()),
+            (b'\r', b"\\r".to_vec()),
+            (b'\t', b"\\t".to_vec()),
+            (b'\\', b"\\\\".to_vec()),
+            (b'"', b"\\\"".to_vec()),
+        ],
+        fallback_prefix: Some(b"\\x".to_vec()),
+        max_fallback_byte: None,
+        must_escape: (0x00..=0x1Fu8)
+            .chain([b'\\', b'"', 0x7F].into_iter())
+            .collect(),
     };
 
     let e = b.mk_regex(r#"\x01"#).unwrap();
@@ -598,26 +614,23 @@ fn test_string_escape_cache_correctness() {
         "different options should produce different results"
     );
 
-    // Verify each matches its expected format
+    // Verify each matches its expected format (no wrapping)
     let mut rx_json = b.to_regex(r_json);
-    match_(&mut rx_json, "\"\\u0001\"");
+    match_(&mut rx_json, "\\u0001");
 
     let mut rx_hex = b.to_regex(r_hex);
-    match_(&mut rx_hex, "\"\\x01\"");
+    match_(&mut rx_hex, "\\x01");
 }
 
 #[test]
 fn test_string_escape_must_escape_high_byte() {
-    // must_escape byte 0x7F (DEL) with HexHH fallback — tests the >= 0x20 path
+    // must_escape byte 0x7F (DEL) with \xHH fallback
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![],
-        fallback_escape: FallbackEscapeFormat::HexHH,
-        escape_prefix: b'\\',
-        quote_char: '"',
-        quote_escape: QuoteEscapeMethod::Backslash,
+        escape_sequences: vec![],
+        fallback_prefix: Some(b"\\x".to_vec()),
+        max_fallback_byte: None,
         must_escape: vec![0x7F],
-        raw_mode: true,
     };
     let e = b.mk_regex(r#"\x7F"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
@@ -628,16 +641,13 @@ fn test_string_escape_must_escape_high_byte() {
 
 #[test]
 fn test_string_escape_unicode_rejects_high_byte() {
-    // UnicodeXXXX fallback must reject must_escape bytes >= 0x80
+    // Fallback with max_fallback_byte must reject must_escape bytes above the limit
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![],
-        fallback_escape: FallbackEscapeFormat::UnicodeXXXX,
-        escape_prefix: b'\\',
-        quote_char: '"',
-        quote_escape: QuoteEscapeMethod::Backslash,
+        escape_sequences: vec![],
+        fallback_prefix: Some(b"\\u00".to_vec()),
+        max_fallback_byte: Some(0x7F),
         must_escape: vec![0x80],
-        raw_mode: true,
     };
     let e = b.mk_regex(r#"\x80"#).unwrap();
     assert!(b.string_escape(e, &opts).is_err());
@@ -651,10 +661,10 @@ fn test_string_escape_control_only_regex() {
     let e = b.mk_regex(r#"[\x00-\x1F]"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    // Should match escaped control chars
-    match_many(&mut rx, &["\"\\n\"", "\"\\t\"", "\"\\u0001\""]);
+    // Should match escaped control chars (no wrapping)
+    match_many(&mut rx, &["\\n", "\\t", "\\u0001"]);
     // Should not match printable chars or unescaped controls
-    no_match_many(&mut rx, &["\"a\"", "\"\x01\""]);
+    no_match_many(&mut rx, &["a", "\x01"]);
 }
 
 #[test]
@@ -692,24 +702,22 @@ fn test_string_escape_percent_encoding() {
 }
 
 #[test]
-fn test_string_escape_normal_quote_method() {
-    // With Normal quote method, quote_char is escaped via fallback, not specially
+fn test_string_escape_no_quote_special() {
+    // Quote char escaped via fallback, not specially
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![(b'\\', b'\\')],
-        fallback_escape: FallbackEscapeFormat::HexHH,
-        escape_prefix: b'\\',
-        quote_char: '"',
-        quote_escape: QuoteEscapeMethod::Normal,
+        escape_sequences: vec![
+            (b'\\', b"\\\\".to_vec()),
+        ],
+        fallback_prefix: Some(b"\\x".to_vec()),
+        max_fallback_byte: None,
         must_escape: vec![b'"', b'\\'],
-        raw_mode: true,
     };
     let e = b.mk_regex(r#"""#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    // With Normal, " should be escaped via fallback \xHH, not \"
+    // " has no escape_sequence, falls through to \xHH fallback
     match_many(&mut rx, &["\\x22"]);
-    // \" should NOT match (quote_single doesn't have an entry for ")
     no_match_many(&mut rx, &["\\\"", "\""]);
 }
 
