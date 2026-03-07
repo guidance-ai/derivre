@@ -101,22 +101,10 @@ impl StringEscapeOptions {
     /// lack an explicit escape sequence (e.g., 0x01) cannot be represented
     /// and will be excluded from the output regex.
     pub fn json_raw() -> Self {
-        Self {
-            escape_sequences: vec![
-                (0x08, b"\\b".to_vec()),
-                (0x0C, b"\\f".to_vec()),
-                (b'\n', b"\\n".to_vec()),
-                (b'\r', b"\\r".to_vec()),
-                (b'\t', b"\\t".to_vec()),
-                (b'\\', b"\\\\".to_vec()),
-                (b'"', b"\\\"".to_vec()),
-            ],
-            fallback_prefix: None,
-            max_fallback_byte: None,
-            must_escape: (0x00..=0x1Fu8)
-                .chain([b'\\', b'"', 0x7F].into_iter())
-                .collect(),
-        }
+        let mut opts = Self::json();
+        opts.fallback_prefix = None;
+        opts.max_fallback_byte = None;
+        opts
     }
 
     /// Build options for URL percent-encoding (RFC 3986).
@@ -187,29 +175,24 @@ impl JsonQuoteOptions {
         self.allowed_escapes.as_bytes().contains(&b)
     }
 
-    pub fn set_if_allowed(&self, bs: &mut [u32], b: u8) {
-        if self.is_allowed(b) {
-            byteset_set(bs, b as usize);
-        }
-    }
-
     /// Convert to [`StringEscapeOptions`].
     ///
     /// The `\\` and `"` entries in `allowed_escapes` are ignored; backslash
     /// and double-quote escaping are always enabled in the result.
     pub fn to_string_escape_options(&self) -> StringEscapeOptions {
-        let escape_map: &[(u8, u8, u8)] = &[
-            (b'b', 0x08, b'b'),
-            (b'f', 0x0C, b'f'),
-            (b'n', b'\n', b'n'),
-            (b'r', b'\r', b'r'),
-            (b't', b'\t', b't'),
+        // (escape_char, source_byte) — escape_char doubles as the allowed_escapes key
+        let escape_map: &[(u8, u8)] = &[
+            (b'b', 0x08),
+            (b'f', 0x0C),
+            (b'n', b'\n'),
+            (b'r', b'\r'),
+            (b't', b'\t'),
         ];
 
         let mut escape_sequences: Vec<(u8, Vec<u8>)> = escape_map
             .iter()
-            .filter(|(key, _, _)| self.is_allowed(*key))
-            .map(|(_, byte, esc)| (*byte, vec![b'\\', *esc]))
+            .filter(|(key, _)| self.is_allowed(*key))
+            .map(|(esc, byte)| (*byte, vec![b'\\', *esc]))
             .collect();
 
         // Backslash and double-quote are always escaped

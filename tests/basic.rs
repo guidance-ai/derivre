@@ -493,8 +493,16 @@ fn test_string_escape_hex_fallback() {
     let e = b.mk_regex(r#"\x01"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    match_many(&mut rx, &["\\x01", "\\x01"]);
+    match_many(&mut rx, &["\\x01"]);
     no_match_many(&mut rx, &["\x01", "\\u0001"]);
+
+    // \n has both explicit (\n) and fallback (\x0A)
+    let e = b.mk_regex(r#"\n"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\n", "\\x0A", "\\x0a"]);
+    // Confirm hex is byte-specific: \x0D is \r's encoding, not \n's
+    no_match_many(&mut rx, &["\n", "\\x0D"]);
 
     // \x7F should work
     let e = b.mk_regex(r#"\x7F"#).unwrap();
@@ -538,16 +546,17 @@ fn test_string_escape_single_quote() {
     let e = b.mk_regex(r#"[a']"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
-    match_many(&mut rx, &["a", "\\'"]);
+    // ' has both explicit (\') and fallback (\x27) — both valid
+    match_many(&mut rx, &["a", "\\'", "\\x27"]);
     no_match_many(&mut rx, &["'", "\\\\'"]);
 
-    // Bell character (0x07) should escape as \a
+    // Bell character (0x07) should escape as \a or \x07 (both valid)
     let e = b.mk_regex(r#"\x07"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let s = b.exprset().expr_to_string(r);
     println!("bell escape: {}", s);
     let mut rx = b.to_regex(r);
-    match_many(&mut rx, &["\\a"]);
+    match_many(&mut rx, &["\\a", "\\x07"]);
 }
 
 #[test]
@@ -568,8 +577,8 @@ fn test_string_escape_doubling() {
     let mut rx = b.to_regex(r);
     // 'a' passes through, single quote becomes ''
     match_many(&mut rx, &["a", "''"]);
-    no_match_many(&mut rx, &["'", "\\''"]);
-
+    // No fallback configured, so \x27 is not a valid representation
+    no_match_many(&mut rx, &["'", "\\'", "\\x27"]);
     // Backslash is literal in YAML single-quoted mode — not an escape prefix
     let e = b.mk_regex(r#"[a\\]"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
@@ -614,12 +623,14 @@ fn test_string_escape_cache_correctness() {
         "different options should produce different results"
     );
 
-    // Verify each matches its expected format (no wrapping)
+    // Verify each matches its expected format and rejects the other
     let mut rx_json = b.to_regex(r_json);
     match_(&mut rx_json, "\\u0001");
+    no_match(&mut rx_json, "\\x01");
 
     let mut rx_hex = b.to_regex(r_hex);
     match_(&mut rx_hex, "\\x01");
+    no_match(&mut rx_hex, "\\u0001");
 }
 
 #[test]
@@ -655,14 +666,15 @@ fn test_string_escape_unicode_rejects_high_byte() {
 
 #[test]
 fn test_string_escape_control_only_regex() {
-    // Regex matching only control characters — tests the fast path
+    // Regex matching only control characters
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions::json();
     let e = b.mk_regex(r#"[\x00-\x1F]"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
     // Should match escaped control chars (no wrapping)
-    match_many(&mut rx, &["\\n", "\\t", "\\u0001"]);
+    // \u0009 verifies both explicit (\t) and fallback (\u0009) are valid for the same byte
+    match_many(&mut rx, &["\\n", "\\t", "\\u0001", "\\u0009", "\\u000A"]);
     // Should not match printable chars or unescaped controls
     no_match_many(&mut rx, &["a", "\x01"]);
 }
@@ -699,6 +711,13 @@ fn test_string_escape_percent_encoding() {
     let mut rx = b.to_regex(r);
     match_many(&mut rx, &["%2F", "%2f"]);
     no_match_many(&mut rx, &["/"]);
+
+    // Multi-byte UTF-8: é (U+00E9) = bytes 0xC3 0xA9 → %C3%A9
+    let e = b.mk_regex("é").unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["%C3%A9", "%c3%a9", "%C3%a9"]);
+    no_match_many(&mut rx, &["é", "%C3", "%A9"]);
 }
 
 #[test]
@@ -719,6 +738,13 @@ fn test_string_escape_no_quote_special() {
     // " has no escape_sequence, falls through to \xHH fallback
     match_many(&mut rx, &["\\x22"]);
     no_match_many(&mut rx, &["\\\"", "\""]);
+
+    // \\ has an explicit escape, but \x5C fallback also valid
+    let e = b.mk_regex(r#"\\"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\\\", "\\x5C", "\\x5c"]);
+    no_match_many(&mut rx, &["\\"]);
 }
 
 fn mk_search_regex(rx: &str) -> Regex {
