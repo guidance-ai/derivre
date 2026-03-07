@@ -410,7 +410,9 @@ fn test_json_uxxxx() {
     let mut rx = b.to_regex(e);
     for x in 0..=0xffff {
         for s in &[format!("\\u{:04X}", x), format!("\\u{:04x}", x)] {
-            if x == 0x007f || ((0x0000..=0x001f).contains(&x) && x != 0x000a) {
+            // 0x00-0x1F (except \n) and 0x7F are control chars that must be escaped;
+            // 0x5C (backslash) is the escape prefix and also has a \uXXXX fallback.
+            if x == 0x007f || x == 0x005c || ((0x0000..=0x001f).contains(&x) && x != 0x000a) {
                 match_(&mut rx, s);
             } else {
                 no_match(&mut rx, s);
@@ -473,8 +475,9 @@ fn test_string_escape_hex_fallback() {
     // Test HexHH fallback format (\xHH instead of \uXXXX)
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
-        single_char_escapes: vec![(b'\n', b'n'), (b'\r', b'r'), (b'\t', b't')],
+        single_char_escapes: vec![(b'\n', b'n'), (b'\r', b'r'), (b'\t', b't'), (b'\\', b'\\')],
         fallback_escape: FallbackEscapeFormat::HexHH,
+        escape_prefix: b'\\',
         quote_char: '"',
         quote_escape: QuoteEscapeMethod::Backslash,
         must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
@@ -516,8 +519,10 @@ fn test_string_escape_single_quote() {
             (b'\r', b'r'),
             (b'\t', b't'),
             (0x0B, b'v'), // \v (vertical tab)
+            (b'\\', b'\\'),
         ],
         fallback_escape: FallbackEscapeFormat::HexHH,
+        escape_prefix: b'\\',
         quote_char: '\'',
         quote_escape: QuoteEscapeMethod::Backslash,
         must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
@@ -547,6 +552,7 @@ fn test_string_escape_doubling() {
     let opts = StringEscapeOptions {
         single_char_escapes: vec![],
         fallback_escape: FallbackEscapeFormat::None,
+        escape_prefix: b'\\',
         quote_char: '\'',
         quote_escape: QuoteEscapeMethod::Doubling,
         must_escape: vec![],
@@ -607,6 +613,7 @@ fn test_string_escape_must_escape_high_byte() {
     let opts = StringEscapeOptions {
         single_char_escapes: vec![],
         fallback_escape: FallbackEscapeFormat::HexHH,
+        escape_prefix: b'\\',
         quote_char: '"',
         quote_escape: QuoteEscapeMethod::Backslash,
         must_escape: vec![0x7F],
@@ -626,6 +633,7 @@ fn test_string_escape_unicode_rejects_high_byte() {
     let opts = StringEscapeOptions {
         single_char_escapes: vec![],
         fallback_escape: FallbackEscapeFormat::UnicodeXXXX,
+        escape_prefix: b'\\',
         quote_char: '"',
         quote_escape: QuoteEscapeMethod::Backslash,
         must_escape: vec![0x80],
@@ -647,6 +655,62 @@ fn test_string_escape_control_only_regex() {
     match_many(&mut rx, &["\"\\n\"", "\"\\t\"", "\"\\u0001\""]);
     // Should not match printable chars or unescaped controls
     no_match_many(&mut rx, &["\"a\"", "\"\x01\""]);
+}
+
+#[test]
+fn test_string_escape_percent_encoding() {
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions::url_percent_encoding();
+
+    // Space (0x20) should be %20
+    let e = b.mk_regex(r#" "#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["%20"]);
+    no_match_many(&mut rx, &[" ", "%2G"]);
+
+    // Unreserved chars pass through
+    let e = b.mk_regex(r#"[a-z]"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["a", "z"]);
+    no_match_many(&mut rx, &["%61"]);
+
+    // Percent itself is escaped as %25
+    let e = b.mk_regex(r#"%"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["%25"]);
+    no_match_many(&mut rx, &["%", "%%"]);
+
+    // Forward slash (reserved) should be escaped
+    let e = b.mk_regex(r#"/"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["%2F", "%2f"]);
+    no_match_many(&mut rx, &["/"]);
+}
+
+#[test]
+fn test_string_escape_normal_quote_method() {
+    // With Normal quote method, quote_char is escaped via fallback, not specially
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        single_char_escapes: vec![(b'\\', b'\\')],
+        fallback_escape: FallbackEscapeFormat::HexHH,
+        escape_prefix: b'\\',
+        quote_char: '"',
+        quote_escape: QuoteEscapeMethod::Normal,
+        must_escape: vec![b'"', b'\\'],
+        raw_mode: true,
+    };
+    let e = b.mk_regex(r#"""#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    // With Normal, " should be escaped via fallback \xHH, not \"
+    match_many(&mut rx, &["\\x22"]);
+    // \" should NOT match (quote_single doesn't have an entry for ")
+    no_match_many(&mut rx, &["\\\"", "\""]);
 }
 
 fn mk_search_regex(rx: &str) -> Regex {

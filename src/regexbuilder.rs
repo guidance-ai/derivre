@@ -35,6 +35,9 @@ pub enum FallbackEscapeFormat {
     /// `\xHH` — 2-digit hex escape (Python, C, YAML double-quoted).
     /// Works for any byte 0x00–0xFF.
     HexHH,
+    /// Bare 2-digit hex — just the escape prefix followed by `HH`.
+    /// For example, with `escape_prefix: b'%'`, byte 0x20 becomes `%20`.
+    BareHH,
     /// No fallback — must-escape bytes without a single-char mapping will
     /// be excluded from the output regex.
     None,
@@ -42,7 +45,7 @@ pub enum FallbackEscapeFormat {
 
 /// How the quote character itself is escaped within the string.
 ///
-/// Also affects whether backslash is treated as an escape prefix;
+/// Also affects whether the escape prefix is active;
 /// see [`StringEscapeOptions`] for the full rules.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum QuoteEscapeMethod {
@@ -50,6 +53,9 @@ pub enum QuoteEscapeMethod {
     Backslash,
     /// Doubling: `'` → `''` (e.g., YAML single-quoted strings).
     Doubling,
+    /// No special handling for the quote character. It is escaped like
+    /// any other must-escape byte via single-char escapes or fallback.
+    Normal,
 }
 
 /// Declarative description of a string literal escape grammar.
@@ -59,21 +65,20 @@ pub enum QuoteEscapeMethod {
 /// options to transform a regex R into R' such that strings matching R', when
 /// unescaped according to this grammar, produce strings matching R.
 ///
-/// # Backslash handling
+/// # Escape prefix handling
 ///
-/// Backslash (`\`) is treated as an escape prefix whenever any of the
-/// following are true:
+/// The [`escape_prefix`](Self::escape_prefix) byte is treated as an escape
+/// prefix whenever any of the following are true:
 /// - [`single_char_escapes`](Self::single_char_escapes) is non-empty
 /// - [`fallback_escape`](Self::fallback_escape) is not
 ///   [`None`](FallbackEscapeFormat::None)
 /// - [`quote_escape`](Self::quote_escape) is
 ///   [`Backslash`](QuoteEscapeMethod::Backslash)
 ///
-/// When backslash is an escape prefix, it is implicitly added to the set of
-/// bytes that must be escaped (a literal `\` in the input becomes `\\` in
-/// the output). When none of the above conditions hold (e.g., pure
-/// [`Doubling`](QuoteEscapeMethod::Doubling) with no other escapes),
-/// backslash passes through as a literal character.
+/// When the escape prefix is active, it is implicitly added to the set of
+/// bytes that must be escaped. When none of the above conditions hold
+/// (e.g., pure [`Doubling`](QuoteEscapeMethod::Doubling) with no other
+/// escapes), the escape prefix byte passes through as a literal character.
 ///
 /// # Normalization
 ///
@@ -82,14 +87,23 @@ pub enum QuoteEscapeMethod {
 /// before use, so insertion order does not affect behavior or caching.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StringEscapeOptions {
-    /// Mappings from byte value to the character placed after the backslash.
-    /// For example, `(0x0A, b'n')` means byte 0x0A is escaped as `\n`.
-    /// Backslash and quote_char need not be listed (handled implicitly);
-    /// including them is harmless but redundant.
+    /// Mappings from byte value to the character placed after the escape
+    /// prefix. For example, `(0x0A, b'n')` means byte 0x0A is escaped as
+    /// `\n` (when `escape_prefix` is `b'\\'`).
+    /// The escape prefix byte should be listed here if it should be escaped
+    /// by doubling (e.g., `(b'\\', b'\\')` for `\\` → `\\\\`). If not
+    /// listed, the escape prefix is escaped via the fallback format.
+    /// The quote character need not be listed for `Backslash` or `Doubling`
+    /// quote escape modes (handled implicitly).
     pub single_char_escapes: Vec<(u8, u8)>,
 
     /// How to escape must-escape bytes that have no single-char mapping.
     pub fallback_escape: FallbackEscapeFormat,
+
+    /// The byte used as escape prefix for single-char escapes and
+    /// fallback formats. The escape prefix is implicitly added to
+    /// must_escape when active.
+    pub escape_prefix: u8,
 
     /// ASCII character used to delimit the string (e.g., `'"'`, `'\''`).
     pub quote_char: char,
@@ -98,7 +112,7 @@ pub struct StringEscapeOptions {
     pub quote_escape: QuoteEscapeMethod,
 
     /// Bytes that MUST be escaped in the string body. `quote_char` and
-    /// (when applicable) backslash are added implicitly.
+    /// (when applicable) the escape prefix are added implicitly.
     /// Bytes with neither a single-char mapping nor a fallback format
     /// will be silently excluded from the output regex.
     pub must_escape: Vec<u8>,
@@ -130,8 +144,10 @@ impl StringEscapeOptions {
                 (b'\n', b'n'),
                 (b'\r', b'r'),
                 (b'\t', b't'),
+                (b'\\', b'\\'),
             ],
             fallback_escape: FallbackEscapeFormat::UnicodeXXXX,
+            escape_prefix: b'\\',
             quote_char: '"',
             quote_escape: QuoteEscapeMethod::Backslash,
             must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
@@ -153,11 +169,37 @@ impl StringEscapeOptions {
                 (b'\n', b'n'),
                 (b'\r', b'r'),
                 (b'\t', b't'),
+                (b'\\', b'\\'),
             ],
             fallback_escape: FallbackEscapeFormat::None,
+            escape_prefix: b'\\',
             quote_char: '"',
             quote_escape: QuoteEscapeMethod::Backslash,
             must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
+            raw_mode: true,
+        }
+    }
+
+    /// Build options for URL percent-encoding (RFC 3986).
+    ///
+    /// Uses `%HH` for all bytes outside the unreserved set
+    /// (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`). No string delimiters.
+    pub fn url_percent_encoding() -> Self {
+        let unreserved: Vec<u8> = (b'A'..=b'Z')
+            .chain(b'a'..=b'z')
+            .chain(b'0'..=b'9')
+            .chain([b'-', b'.', b'_', b'~'].into_iter())
+            .collect();
+        let must_escape: Vec<u8> = (0x00..=0xFFu8)
+            .filter(|b| !unreserved.contains(b))
+            .collect();
+        Self {
+            single_char_escapes: vec![],
+            fallback_escape: FallbackEscapeFormat::BareHH,
+            escape_prefix: b'%',
+            quote_char: '"',
+            quote_escape: QuoteEscapeMethod::Normal,
+            must_escape,
             raw_mode: true,
         }
     }
@@ -226,6 +268,7 @@ impl JsonQuoteOptions {
             (b'n', b'\n', b'n'),
             (b'r', b'\r', b'r'),
             (b't', b'\t', b't'),
+            (b'\\', b'\\', b'\\'),
         ];
 
         let single_char_escapes: Vec<(u8, u8)> = escape_map
@@ -243,6 +286,7 @@ impl JsonQuoteOptions {
         StringEscapeOptions {
             single_char_escapes,
             fallback_escape,
+            escape_prefix: b'\\',
             quote_char: '"',
             quote_escape: QuoteEscapeMethod::Backslash,
             must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
@@ -583,6 +627,7 @@ impl RegexBuilder {
             }
         }
         let qc = options.quote_char as u8;
+        let ep = options.escape_prefix;
 
         // Build a lookup table: byte -> Some(escape_char) for single-char escapes
         let mut escape_map = [None::<u8>; 256];
@@ -590,51 +635,53 @@ impl RegexBuilder {
             escape_map[byte as usize] = Some(esc);
         }
 
-        // Build must_escape byteset (including implicit quote_char, and backslash
-        // when the grammar uses backslash as an escape prefix)
+        // Build must_escape byteset (including implicit quote_char, and escape
+        // prefix when the grammar uses it as an escape prefix)
         let mut must_escape_set = [false; 256];
         for &b in &options.must_escape {
             must_escape_set[b as usize] = true;
         }
-        // Backslash is an escape prefix when: there are single-char escapes,
+        // The escape prefix is active when: there are single-char escapes,
         // there's a fallback escape format, or the quote char is backslash-escaped.
-        let uses_backslash = !options.single_char_escapes.is_empty()
+        let uses_escape_prefix = !options.single_char_escapes.is_empty()
             || !matches!(options.fallback_escape, FallbackEscapeFormat::None)
             || matches!(options.quote_escape, QuoteEscapeMethod::Backslash);
-        if uses_backslash {
-            must_escape_set[b'\\' as usize] = true;
+        if uses_escape_prefix {
+            must_escape_set[ep as usize] = true;
         }
-        must_escape_set[qc as usize] = true;
+        if !matches!(options.quote_escape, QuoteEscapeMethod::Normal) {
+            must_escape_set[qc as usize] = true;
+        }
 
-        // returns Some(X) iff b should be escaped as \X (single-char)
+        // returns Some(X) iff b should be escaped as <ep>X (single-char)
         fn quote_single(
             b: u8,
-            qc: u8,
-            uses_backslash: bool,
             escape_map: &[Option<u8>; 256],
         ) -> Option<u8> {
-            match b {
-                b'\\' if uses_backslash => Some(b'\\'),
-                c if c == qc && uses_backslash => Some(c),
-                _ => escape_map[b as usize],
-            }
+            escape_map[b as usize]
         }
 
-        // Collect the set of escape chars that appear after backslash for
-        // single-char escapes (used to build regex byte sets).
+        // Collect the set of escape chars that appear after the escape prefix
+        // for single-char escapes (used to build regex byte sets).
         fn single_escape_char_byteset(
             include_nl_byte: bool,
             qc: u8,
-            uses_backslash: bool,
+            uses_escape_prefix: bool,
+            ep: u8,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
+            quote_escape: &QuoteEscapeMethod,
         ) -> Vec<u32> {
             let mut bs = byteset_256();
             // qc might be a control char (< 0x20); if so, include its escape
             // char in this byteset since it's in the fast-path control range.
-            // Backslash (0x5C) is never < 0x20, so no action needed for it.
-            if uses_backslash && qc < 0x20 {
+            if uses_escape_prefix && qc < 0x20
+                && !matches!(quote_escape, QuoteEscapeMethod::Normal)
+            {
                 byteset_set(&mut bs, qc as usize);
+            }
+            if uses_escape_prefix && ep < 0x20 {
+                byteset_set(&mut bs, ep as usize);
             }
             for b in 0..=255u8 {
                 if !must_escape_set[b as usize] {
@@ -672,13 +719,13 @@ impl RegexBuilder {
             let prefix_str = match options.fallback_escape {
                 FallbackEscapeFormat::UnicodeXXXX => "u00",
                 FallbackEscapeFormat::HexHH => "x",
+                FallbackEscapeFormat::BareHH => "",
                 FallbackEscapeFormat::None => return ExprRef::NO_MATCH,
             };
-            let prefix = exprset.mk_literal(prefix_str);
-            if include_nl {
+            let hex_part = if include_nl {
                 let hex0 = exprset.mk_byte_set(&byteset_from_range(b'0', b'1'));
                 let hex1 = exprset.mk_byte_set(&hex_byteset(include_nl));
-                exprset.mk_concat_vec(&[prefix, hex0, hex1])
+                exprset.mk_concat(hex0, hex1)
             } else {
                 let n0 = exprset.mk_byte(b'0');
                 let n1 = exprset.mk_byte(b'1');
@@ -686,8 +733,13 @@ impl RegexBuilder {
                 let hex0 = exprset.mk_concat(n0, hex0);
                 let hex1 = exprset.mk_byte_set(&hex_byteset(true));
                 let hex1 = exprset.mk_concat(n1, hex1);
-                let hex01 = exprset.mk_or(&mut vec![hex0, hex1]);
-                exprset.mk_concat(prefix, hex01)
+                exprset.mk_or(&mut vec![hex0, hex1])
+            };
+            if prefix_str.is_empty() {
+                hex_part
+            } else {
+                let prefix = exprset.mk_literal(prefix_str);
+                exprset.mk_concat(prefix, hex_part)
             }
         }
 
@@ -696,36 +748,40 @@ impl RegexBuilder {
             exprset: &mut ExprSet,
             include_nl: bool,
             qc: u8,
-            uses_backslash: bool,
+            uses_escape_prefix: bool,
+            ep: u8,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
             options: &StringEscapeOptions,
         ) -> ExprRef {
-            let backslash = exprset.mk_byte(b'\\');
+            let esc_prefix = exprset.mk_byte(ep);
             let single_esc = exprset.mk_byte_set(&single_escape_char_byteset(
                 include_nl,
                 qc,
-                uses_backslash,
+                uses_escape_prefix,
+                ep,
                 escape_map,
                 must_escape_set,
+                &options.quote_escape,
             ));
             let fallback = mk_fallback_all_ctrl(exprset, include_nl, options);
 
             let combined = exprset.mk_or(&mut vec![fallback, single_esc]);
-            exprset.mk_concat(backslash, combined)
+            exprset.mk_concat(esc_prefix, combined)
         }
 
         fn quote_byteset(
             exprset: &mut ExprSet,
             bs: Vec<u32>,
             qc: u8,
-            uses_backslash: bool,
+            uses_escape_prefix: bool,
+            ep: u8,
             escape_map: &[Option<u8>; 256],
             must_escape_set: &[bool; 256],
             options: &StringEscapeOptions,
         ) -> ExprRef {
             let has_fallback = !matches!(options.fallback_escape, FallbackEscapeFormat::None);
-            let backslash = exprset.mk_byte(b'\\');
+            let esc_prefix = exprset.mk_byte(ep);
 
             let used_fast_path;
             let quoted = if bs[0] == !(1 << b'\n') {
@@ -735,7 +791,8 @@ impl RegexBuilder {
                     exprset,
                     false,
                     qc,
-                    uses_backslash,
+                    uses_escape_prefix,
+                    ep,
                     escape_map,
                     must_escape_set,
                     options,
@@ -747,7 +804,8 @@ impl RegexBuilder {
                     exprset,
                     true,
                     qc,
-                    uses_backslash,
+                    uses_escape_prefix,
+                    ep,
                     escape_map,
                     must_escape_set,
                     options,
@@ -764,11 +822,10 @@ impl RegexBuilder {
                     if !must_escape_set[b as usize] {
                         continue;
                     }
-                    // Skip backslash and qc — handled separately below
-                    if (b == b'\\' && uses_backslash) || b == qc {
+                    if b == qc && !matches!(options.quote_escape, QuoteEscapeMethod::Normal) {
                         continue;
                     }
-                    if let Some(q) = quote_single(b, qc, uses_backslash, escape_map) {
+                    if let Some(q) = quote_single(b, escape_map) {
                         byteset_set(&mut quoted_bs, q as usize);
                     }
                     if has_fallback {
@@ -783,62 +840,68 @@ impl RegexBuilder {
 
                 let fallback_part = if has_fallback {
                     let other_bytes = exprset.mk_or(&mut other_bytes);
-                    let prefix = match options.fallback_escape {
-                        FallbackEscapeFormat::UnicodeXXXX => exprset.mk_literal("u00"),
-                        FallbackEscapeFormat::HexHH => exprset.mk_literal("x"),
+                    match options.fallback_escape {
+                        FallbackEscapeFormat::UnicodeXXXX => {
+                            let prefix = exprset.mk_literal("u00");
+                            exprset.mk_concat(prefix, other_bytes)
+                        }
+                        FallbackEscapeFormat::HexHH => {
+                            let prefix = exprset.mk_literal("x");
+                            exprset.mk_concat(prefix, other_bytes)
+                        }
+                        FallbackEscapeFormat::BareHH => other_bytes,
                         FallbackEscapeFormat::None => unreachable!(),
-                    };
-                    exprset.mk_concat(prefix, other_bytes)
+                    }
                 } else {
                     ExprRef::NO_MATCH
                 };
 
                 let quoted_or_other = exprset.mk_or(&mut vec![quoted_bs, fallback_part]);
-                exprset.mk_concat(backslash, quoted_or_other)
+                exprset.mk_concat(esc_prefix, quoted_or_other)
             };
 
             let mut bs_passthrough = bs;
             let mut alts = vec![quoted];
-            // Handle backslash and quote_char first (before clearing must-escape)
-            if byteset_contains(&bs_passthrough, b'\\' as usize) && uses_backslash {
-                alts.push(exprset.mk_literal("\\\\"));
-                byteset_clear(&mut bs_passthrough, b'\\' as usize);
-            }
-            if byteset_contains(&bs_passthrough, qc as usize) {
-                match options.quote_escape {
-                    QuoteEscapeMethod::Backslash => {
-                        let escaped = format!("\\{}", qc as char);
-                        alts.push(exprset.mk_literal(&escaped));
+            // Handle quote_char for non-Normal modes
+            if !matches!(options.quote_escape, QuoteEscapeMethod::Normal) {
+                if byteset_contains(&bs_passthrough, qc as usize) {
+                    match options.quote_escape {
+                        QuoteEscapeMethod::Backslash => {
+                            let escaped = format!("{}{}", ep as char, qc as char);
+                            alts.push(exprset.mk_literal(&escaped));
+                        }
+                        QuoteEscapeMethod::Doubling => {
+                            let doubled = format!("{}{}", qc as char, qc as char);
+                            alts.push(exprset.mk_literal(&doubled));
+                        }
+                        QuoteEscapeMethod::Normal => unreachable!(),
                     }
-                    QuoteEscapeMethod::Doubling => {
-                        let doubled = format!("{}{}", qc as char, qc as char);
-                        alts.push(exprset.mk_literal(&doubled));
-                    }
+                    byteset_clear(&mut bs_passthrough, qc as usize);
                 }
-                byteset_clear(&mut bs_passthrough, qc as usize);
             }
             // Handle must-escape bytes >= 0x20 that weren't covered by the
             // control-char fast path (the slow path already handles all 256 bytes)
             if used_fast_path {
                 for b in 0x20..=0xFFu8 {
-                    if b == b'\\' || b == qc {
-                        continue; // already handled above
+                    if b == qc && !matches!(options.quote_escape, QuoteEscapeMethod::Normal) {
+                        continue;
                     }
                     if !byteset_contains(&bs_passthrough, b as usize)
                         || !must_escape_set[b as usize]
                     {
                         continue;
                     }
-                    if let Some(q) = quote_single(b, qc, uses_backslash, escape_map) {
-                        let esc = exprset.mk_literal(&format!("\\{}", q as char));
+                    if let Some(q) = quote_single(b, escape_map) {
+                        let esc = exprset.mk_literal(&format!("{}{}", ep as char, q as char));
                         alts.push(esc);
                     }
                     if has_fallback {
                         let lit_lower = format!("{:02x}", b);
                         let lit_upper = format!("{:02X}", b);
                         let prefix = match options.fallback_escape {
-                            FallbackEscapeFormat::UnicodeXXXX => "\\u00",
-                            FallbackEscapeFormat::HexHH => "\\x",
+                            FallbackEscapeFormat::UnicodeXXXX => format!("{}u00", ep as char),
+                            FallbackEscapeFormat::HexHH => format!("{}x", ep as char),
+                            FallbackEscapeFormat::BareHH => format!("{}", ep as char),
                             FallbackEscapeFormat::None => unreachable!(),
                         };
                         alts.push(exprset.mk_literal(&format!("{}{}", prefix, lit_lower)));
@@ -860,11 +923,9 @@ impl RegexBuilder {
 
         fn byte_needs_escape(
             b: u8,
-            qc: u8,
-            uses_backslash: bool,
             must_escape_set: &[bool; 256],
         ) -> bool {
-            (b == b'\\' && uses_backslash) || b == qc || must_escape_set[b as usize]
+            must_escape_set[b as usize]
         }
 
         let cache = self
@@ -883,7 +944,7 @@ impl RegexBuilder {
                         // Check if any byte in the set needs escaping
                         let needs = (0..=255u8).any(|b| {
                             byteset_contains(bs, b as usize)
-                                && byte_needs_escape(b, qc, uses_backslash, &must_escape_set)
+                                && byte_needs_escape(b, &must_escape_set)
                         });
                         if needs {
                             let bs = bs.to_vec();
@@ -891,7 +952,8 @@ impl RegexBuilder {
                                 exprset,
                                 bs,
                                 qc,
-                                uses_backslash,
+                                uses_escape_prefix,
+                                ep,
                                 &escape_map,
                                 &must_escape_set,
                                 options,
@@ -901,12 +963,13 @@ impl RegexBuilder {
                         }
                     }
                     Expr::Byte(b) => {
-                        if byte_needs_escape(b, qc, uses_backslash, &must_escape_set) {
+                        if byte_needs_escape(b, &must_escape_set) {
                             quote_byteset(
                                 exprset,
                                 byteset_from_range(b, b),
                                 qc,
-                                uses_backslash,
+                                uses_escape_prefix,
+                                ep,
                                 &escape_map,
                                 &must_escape_set,
                                 options,
@@ -918,7 +981,7 @@ impl RegexBuilder {
                     Expr::ByteConcat(_, bytes, args0) => {
                         if bytes
                             .iter()
-                            .any(|b| byte_needs_escape(*b, qc, uses_backslash, &must_escape_set))
+                            .any(|b| byte_needs_escape(*b, &must_escape_set))
                         {
                             let mut acc = vec![];
                             let mut idx = 0;
@@ -928,8 +991,6 @@ impl RegexBuilder {
                                 while idx < bytes.len()
                                     && !byte_needs_escape(
                                         bytes[idx],
-                                        qc,
-                                        uses_backslash,
                                         &must_escape_set,
                                     )
                                 {
@@ -945,7 +1006,8 @@ impl RegexBuilder {
                                         exprset,
                                         byteset_from_range(b, b),
                                         qc,
-                                        uses_backslash,
+                                        uses_escape_prefix,
+                                        ep,
                                         &escape_map,
                                         &must_escape_set,
                                         options,
