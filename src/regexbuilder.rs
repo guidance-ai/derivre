@@ -71,11 +71,14 @@ impl StringEscapeOptions {
         self.must_escape.dedup();
     }
 
-    /// Build options equivalent to JSON string escaping (RFC 8259).
+    /// Build options for JSON string escaping.
     ///
     /// Uses `\u00XX` fallback, and explicit escape sequences for
     /// `\b`, `\f`, `\n`, `\r`, `\t`, `\\`, `\"`.
     /// Control characters 0x00–0x1F, 0x7F, `\`, and `"` are in `must_escape`.
+    ///
+    /// Note: RFC 8259 only requires escaping 0x00–0x1F, `\`, and `"`.
+    /// We additionally escape 0x7F (DEL) as a conservative safety measure.
     pub fn json() -> Self {
         Self {
             escape_sequences: vec![

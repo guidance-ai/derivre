@@ -585,6 +585,13 @@ fn test_string_escape_doubling() {
     let mut rx = b.to_regex(r);
     match_many(&mut rx, &["a", "\\"]); // literal backslash, not escaped
     no_match_many(&mut rx, &["\\\\"]); // double-backslash should NOT match
+
+    // Newlines are literal in YAML single-quoted strings (per YAML 1.2)
+    let e = b.mk_regex(r#"\n"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\n"]); // literal newline passes through
+    no_match_many(&mut rx, &["\\n"]); // \n escape sequence is NOT valid here
 }
 
 #[test]
@@ -684,12 +691,12 @@ fn test_string_escape_percent_encoding() {
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions::url_percent_encoding();
 
-    // Space (0x20) should be %20
+    // Space (0x20) should be %20 (RFC 3986, not + as in HTML form encoding)
     let e = b.mk_regex(r#" "#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
     let mut rx = b.to_regex(r);
     match_many(&mut rx, &["%20"]);
-    no_match_many(&mut rx, &[" ", "%2G"]);
+    no_match_many(&mut rx, &[" ", "+", "%2G"]);
 
     // Unreserved chars pass through
     let e = b.mk_regex(r#"[a-z]"#).unwrap();
@@ -745,6 +752,90 @@ fn test_string_escape_no_quote_special() {
     let mut rx = b.to_regex(r);
     match_many(&mut rx, &["\\\\", "\\x5C", "\\x5c"]);
     no_match_many(&mut rx, &["\\"]);
+}
+
+#[test]
+fn test_string_escape_json_solidus() {
+    // RFC 8259 allows \/ as an escape for /, but / does not require escaping.
+    // Our JSON config treats / as literal (not in must_escape), so \/ is not
+    // accepted. This is correct for canonical output generation.
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions::json();
+    let e = b.mk_regex(r#"/"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["/"]);
+    no_match_many(&mut rx, &["\\/", "%2F"]);
+}
+
+#[test]
+fn test_string_escape_multi_char() {
+    // Multi-character regex: tests the ByteConcat path in string_escape
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions::json();
+
+    // Literal with embedded must-escape bytes
+    let e = b.mk_regex(r#"a\nb"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["a\\nb", "a\\u000Ab"]);
+    no_match_many(&mut rx, &["a\nb", "anb"]);
+
+    // Literal with no must-escape bytes passes through unchanged
+    let e = b.mk_regex("hello").unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_(&mut rx, "hello");
+    no_match_many(&mut rx, &["HELLO", "hell"]);
+}
+
+#[test]
+fn test_string_escape_nullable() {
+    // Nullable regex: empty string should pass through
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions::json();
+
+    let e = b.mk_regex(r#"a?"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["", "a"]);
+    no_match_many(&mut rx, &["b", "aa"]);
+}
+
+#[test]
+fn test_string_escape_unrepresentable() {
+    // When a must-escape byte has no explicit escape and no fallback,
+    // it cannot be represented and is excluded from the output regex.
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        escape_sequences: vec![
+            (b'\n', b"\\n".to_vec()),
+        ],
+        fallback_prefix: None,
+        max_fallback_byte: None,
+        must_escape: (0x00..=0x1Fu8).collect(),
+    };
+
+    // \x01 is must_escape but has no explicit escape and no fallback → excluded
+    let e = b.mk_regex(r#"\x01"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    // Nothing should match — the byte is unrepresentable
+    no_match_many(&mut rx, &["\x01", "\\x01", "\\u0001"]);
+
+    // \n IS representable (has explicit escape), so it works
+    let e = b.mk_regex(r#"\n"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_(&mut rx, "\\n");
+    no_match_many(&mut rx, &["\n", "\\x0A"]);
+
+    // Mixed: [\x01\n] — only \n is representable
+    let e = b.mk_regex(r#"[\x01\n]"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_(&mut rx, "\\n");
+    no_match_many(&mut rx, &["\x01", "\n", "\\x01"]);
 }
 
 fn mk_search_regex(rx: &str) -> Regex {
