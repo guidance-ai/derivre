@@ -1,4 +1,6 @@
-use derivre::{JsonQuoteOptions, NextByte, Regex, RegexAst, RegexBuilder, StringEscapeOptions};
+use derivre::{
+    FallbackFormat, JsonQuoteOptions, NextByte, Regex, RegexAst, RegexBuilder, StringEscapeOptions,
+};
 
 fn check_is_match(rx: &mut Regex, s: &str, exp: bool) {
     if rx.is_match(s) == exp {
@@ -459,8 +461,11 @@ fn test_string_escape_hex_fallback() {
             (b'\r', b"\\r".to_vec()),
             (b'\t', b"\\t".to_vec()),
         ],
-        fallback_prefix: Some(b"\\x".to_vec()),
-        max_fallback_byte: None,
+        fallback: Some(FallbackFormat {
+            prefix: b"\\x".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: None,
+        }),
         must_escape: (0x00..=0x1Fu8).chain(std::iter::once(0x7Fu8)).collect(),
     };
 
@@ -510,8 +515,11 @@ fn test_string_escape_single_quote() {
             (b'\\', b"\\\\".to_vec()),
             (b'\'', b"\\'".to_vec()),
         ],
-        fallback_prefix: Some(b"\\x".to_vec()),
-        max_fallback_byte: None,
+        fallback: Some(FallbackFormat {
+            prefix: b"\\x".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: None,
+        }),
         must_escape: (0x00..=0x1Fu8).chain([b'\\', b'\'', 0x7F]).collect(),
     };
 
@@ -538,8 +546,7 @@ fn test_string_escape_doubling() {
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
         escape_sequences: vec![(b'\'', b"''".to_vec())],
-        fallback_prefix: None,
-        max_fallback_byte: None,
+        fallback: None,
         must_escape: vec![b'\''],
     };
 
@@ -581,8 +588,11 @@ fn test_string_escape_cache_correctness() {
             (b'\\', b"\\\\".to_vec()),
             (b'"', b"\\\"".to_vec()),
         ],
-        fallback_prefix: Some(b"\\x".to_vec()),
-        max_fallback_byte: None,
+        fallback: Some(FallbackFormat {
+            prefix: b"\\x".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: None,
+        }),
         must_escape: (0x00..=0x1Fu8).chain([b'\\', b'"', 0x7F]).collect(),
     };
 
@@ -615,8 +625,11 @@ fn test_string_escape_must_escape_high_byte() {
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
         escape_sequences: vec![],
-        fallback_prefix: Some(b"\\x".to_vec()),
-        max_fallback_byte: None,
+        fallback: Some(FallbackFormat {
+            prefix: b"\\x".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: None,
+        }),
         must_escape: vec![0x7F],
     };
     let e = b.mk_regex(r#"\x7F"#).unwrap();
@@ -628,12 +641,15 @@ fn test_string_escape_must_escape_high_byte() {
 
 #[test]
 fn test_string_escape_unicode_rejects_high_byte() {
-    // Fallback with max_fallback_byte must reject must_escape bytes above the limit
+    // Fallback with valid_byte_ranges must reject must_escape bytes outside the ranges
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
         escape_sequences: vec![],
-        fallback_prefix: Some(b"\\u00".to_vec()),
-        max_fallback_byte: Some(0x7F),
+        fallback: Some(FallbackFormat {
+            prefix: b"\\u00".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: Some(vec![(0x00, 0x7F)]),
+        }),
         must_escape: vec![0x80],
     };
     let e = b.mk_regex(r#"\x80"#).unwrap();
@@ -702,8 +718,11 @@ fn test_string_escape_no_quote_special() {
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
         escape_sequences: vec![(b'\\', b"\\\\".to_vec())],
-        fallback_prefix: Some(b"\\x".to_vec()),
-        max_fallback_byte: None,
+        fallback: Some(FallbackFormat {
+            prefix: b"\\x".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: None,
+        }),
         must_escape: vec![b'"', b'\\'],
     };
     let e = b.mk_regex(r#"""#).unwrap();
@@ -776,8 +795,7 @@ fn test_string_escape_unrepresentable() {
     let mut b = RegexBuilder::new();
     let opts = StringEscapeOptions {
         escape_sequences: vec![(b'\n', b"\\n".to_vec())],
-        fallback_prefix: None,
-        max_fallback_byte: None,
+        fallback: None,
         must_escape: (0x00..=0x1Fu8).collect(),
     };
 
@@ -801,6 +819,101 @@ fn test_string_escape_unrepresentable() {
     let mut rx = b.to_regex(r);
     match_(&mut rx, "\\n");
     no_match_many(&mut rx, &["\x01", "\n", "\\x01"]);
+}
+
+#[test]
+fn test_string_escape_valid_byte_ranges_no_spurious_fallback() {
+    // Bug fix: when a byte is outside valid_byte_ranges but has an explicit
+    // escape_sequence, quote_byteset must NOT also generate a fallback hex
+    // alternative. Use valid_byte_ranges=[(0x00, 0x1F)] with an explicit
+    // escape for space (0x20) to verify no fallback is generated outside
+    // the range.
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions {
+        escape_sequences: vec![(b' ', b"\\s".to_vec())],
+        fallback: Some(FallbackFormat {
+            prefix: b"\\x".to_vec(),
+            suffix: vec![],
+            valid_byte_ranges: Some(vec![(0x00, 0x1F)]),
+        }),
+        must_escape: vec![0x01, b' '],
+    };
+
+    // Space (0x20) is outside valid_byte_ranges but has an explicit escape.
+    // Only the explicit escape \s should be accepted — NOT \x20.
+    let e = b.mk_regex(" ").unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\s"]);
+    no_match_many(&mut rx, &["\\x20", " "]);
+
+    // Byte 0x01 (inside valid_byte_ranges) should still get fallback \x01
+    let e = b.mk_regex(r#"\x01"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["\\x01"]);
+}
+
+#[test]
+fn test_string_escape_xml() {
+    // XML attribute escaping with &#xNN; fallback
+    let mut b = RegexBuilder::new();
+    let opts = StringEscapeOptions::xml();
+
+    // & → &amp; (explicit) or &#x26; (fallback) — both valid
+    let e = b.mk_regex(r#"&"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&amp;", "&#x26;"]);
+    no_match_many(&mut rx, &["&"]);
+
+    // < → &lt;
+    let e = b.mk_regex(r#"<"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&lt;"]);
+    no_match_many(&mut rx, &["<"]);
+
+    // > → &gt;
+    let e = b.mk_regex(r#">"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&gt;"]);
+
+    // " → &quot; (explicit) or &#x22; (fallback)
+    let e = b.mk_regex(r#"""#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&quot;", "&#x22;"]);
+    no_match_many(&mut rx, &["\""]);
+
+    // ' → &apos; (explicit) or &#x27; (fallback)
+    let e = b.mk_regex(r#"'"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&apos;", "&#x27;"]);
+
+    // Control char 0x09 (TAB) → &#x09; (fallback, valid XML 1.0 char)
+    let e = b.mk_regex(r#"\t"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&#x09;"]);
+    // Must NOT match without the trailing semicolon
+    no_match_many(&mut rx, &["&#x09", "\t", "\\t"]);
+
+    // Control char 0x0A (newline) → &#x0A; or &#x0a;
+    let e = b.mk_regex(r#"\n"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["&#x0A;", "&#x0a;"]);
+    no_match_many(&mut rx, &["\n", "&#x0A"]);
+
+    // Regular chars pass through
+    let e = b.mk_regex(r#"[abc]"#).unwrap();
+    let r = b.string_escape(e, &opts).unwrap();
+    let mut rx = b.to_regex(r);
+    match_many(&mut rx, &["a", "b", "c"]);
+    no_match_many(&mut rx, &["&", "<"]);
 }
 
 fn mk_search_regex(rx: &str) -> Regex {

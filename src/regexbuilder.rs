@@ -24,6 +24,47 @@ pub struct RegexBuilder {
     json_quote_options_cache: HashMap<JsonQuoteOptions, StringEscapeOptions>,
 }
 
+/// Describes the hex-based fallback encoding for bytes without an explicit
+/// escape sequence.
+///
+/// The fallback format is: `prefix` + 2 case-insensitive hex digits + `suffix`.
+/// For example, a `FallbackFormat` with prefix `b"\\u00"`, empty suffix, and
+/// `valid_byte_ranges: Some(vec![(0x00, 0x7F)])` produces `\u001F` for byte
+/// 0x1F and rejects bytes above 0x7F.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FallbackFormat {
+    /// Prefix bytes before the 2 hex digits.
+    /// E.g. `b"\\u00"` for JSON, `b"%"` for URL, `b"&#x"` for XML.
+    pub prefix: Vec<u8>,
+
+    /// Suffix bytes after the 2 hex digits.
+    /// E.g. `b";"` for XML `&#xNN;`. Empty for most formats.
+    pub suffix: Vec<u8>,
+
+    /// Inclusive byte ranges eligible for fallback encoding.
+    /// Each `(lo, hi)` pair means bytes `lo..=hi` can use this fallback.
+    /// Must-escape bytes outside all ranges must have an explicit
+    /// `escape_sequence` or they cause an error. `None` means all byte
+    /// values (0x00–0xFF) are valid.
+    ///
+    /// Examples:
+    /// - JSON `\u00XX`: `Some(vec![(0x00, 0x7F)])` — code points only
+    /// - URL `%HH`: `None` — all bytes
+    /// - XML `&#xNN;`: `Some(vec![(0x09, 0x0A), (0x0D, 0x0D), (0x20, 0xFF)])`
+    ///   — only valid XML 1.0 characters
+    pub valid_byte_ranges: Option<Vec<(u8, u8)>>,
+}
+
+impl FallbackFormat {
+    /// Check whether a byte is eligible for this fallback format.
+    pub fn covers_byte(&self, b: u8) -> bool {
+        match &self.valid_byte_ranges {
+            None => true,
+            Some(ranges) => ranges.iter().any(|&(lo, hi)| b >= lo && b <= hi),
+        }
+    }
+}
+
 /// Declarative description of a string literal escape grammar.
 ///
 /// This struct describes how bytes are escaped within a string literal for a
@@ -33,10 +74,10 @@ pub struct RegexBuilder {
 ///
 /// Each byte in [`must_escape`](Self::must_escape) is represented by its
 /// [`escape_sequences`](Self::escape_sequences) entry and/or its
-/// [`fallback_prefix`](Self::fallback_prefix)`+HH` hex form. When both
-/// exist, both are accepted (e.g., JSON `\b` and `\u0008` are both valid
-/// for byte 0x08). Must-escape bytes with neither form are excluded from
-/// the output regex — the byte simply cannot be represented.
+/// [`fallback`](Self::fallback) hex form. When both exist, both are accepted
+/// (e.g., JSON `\b` and `\u0008` are both valid for byte 0x08). Must-escape
+/// bytes with neither form are excluded from the output regex — the byte
+/// simply cannot be represented.
 ///
 /// Delimiter wrapping (e.g., surrounding with `"`) is NOT handled here;
 /// that is the caller's responsibility.
@@ -48,17 +89,10 @@ pub struct StringEscapeOptions {
     /// For example, `(b'\n', b"\\n".to_vec())` means newline → `\n`.
     pub escape_sequences: Vec<(u8, Vec<u8>)>,
 
-    /// For must-escape bytes without an explicit escape_sequence, the escaped
-    /// form is: these prefix bytes followed by 2 case-insensitive hex digits.
-    /// For example, `Some(b"\\u00".to_vec())` produces `\u001F` for byte 0x1F.
-    /// If `None`, such bytes have no representation and are excluded.
-    pub fallback_prefix: Option<Vec<u8>>,
-
-    /// Maximum byte value representable by the fallback format.
-    /// Must-escape bytes above this value without an explicit escape_sequence
-    /// cause an error. `None` means all byte values are valid.
-    /// Use `Some(0x7F)` for `\u00XX` fallback (which encodes code points, not raw bytes).
-    pub max_fallback_byte: Option<u8>,
+    /// Hex-based fallback format for must-escape bytes without an explicit
+    /// escape sequence. `None` means such bytes have no representation and
+    /// are excluded from the output regex.
+    pub fallback: Option<FallbackFormat>,
 
     /// Bytes that MUST be escaped. Any byte in this set will be replaced by
     /// its escape sequence (explicit or fallback). Bytes not in this set
@@ -68,8 +102,7 @@ pub struct StringEscapeOptions {
     pub must_escape: Vec<u8>,
 }
 
-impl StringEscapeOptions {
-    /// Sort and deduplicate `escape_sequences` and `must_escape`.
+impl StringEscapeOptions {    /// Sort and deduplicate `escape_sequences` and `must_escape`.
     /// Called automatically by [`RegexBuilder::string_escape`].
     pub fn normalize(&mut self) {
         self.escape_sequences.sort_by_key(|(b, _)| *b);
@@ -97,8 +130,11 @@ impl StringEscapeOptions {
                 (b'\\', b"\\\\".to_vec()),
                 (b'"', b"\\\"".to_vec()),
             ],
-            fallback_prefix: Some(b"\\u00".to_vec()),
-            max_fallback_byte: Some(0x7F),
+            fallback: Some(FallbackFormat {
+                prefix: b"\\u00".to_vec(),
+                suffix: vec![],
+                valid_byte_ranges: Some(vec![(0x00, 0x7F)]),
+            }),
             must_escape: (0x00..=0x1Fu8).chain([b'\\', b'"', 0x7F]).collect(),
         }
     }
@@ -110,8 +146,7 @@ impl StringEscapeOptions {
     /// and will be excluded from the output regex.
     pub fn json_raw() -> Self {
         let mut opts = Self::json();
-        opts.fallback_prefix = None;
-        opts.max_fallback_byte = None;
+        opts.fallback = None;
         opts
     }
 
@@ -130,9 +165,43 @@ impl StringEscapeOptions {
             .collect();
         Self {
             escape_sequences: vec![],
-            fallback_prefix: Some(b"%".to_vec()),
-            max_fallback_byte: None,
+            fallback: Some(FallbackFormat {
+                prefix: b"%".to_vec(),
+                suffix: vec![],
+                valid_byte_ranges: None,
+            }),
             must_escape,
+        }
+    }
+
+    /// Build options for XML attribute/text escaping.
+    ///
+    /// Uses named entities for `&`, `<`, `>`, `"`, `'` and `&#xNN;` hex
+    /// fallback for the XML 1.0–legal control characters (TAB, LF, CR).
+    ///
+    /// Only bytes that are valid XML 1.0 characters are included in
+    /// `must_escape`. XML 1.0 forbids 0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F,
+    /// and 0x7F entirely — these bytes cannot appear in an XML document at
+    /// all (not even as numeric character references).
+    pub fn xml() -> Self {
+        Self {
+            escape_sequences: vec![
+                (b'&', b"&amp;".to_vec()),
+                (b'<', b"&lt;".to_vec()),
+                (b'>', b"&gt;".to_vec()),
+                (b'"', b"&quot;".to_vec()),
+                (b'\'', b"&apos;".to_vec()),
+            ],
+            fallback: Some(FallbackFormat {
+                prefix: b"&#x".to_vec(),
+                suffix: b";".to_vec(),
+                valid_byte_ranges: Some(vec![(0x09, 0x0A), (0x0D, 0x0D), (0x20, 0xFF)]),
+            }),
+            // Only valid XML 1.0 characters: TAB, LF, CR, and the five
+            // special markup characters that need entity escaping.
+            must_escape: [0x09, 0x0A, 0x0D, b'&', b'<', b'>', b'"', b'\'']
+                .into_iter()
+                .collect(),
         }
     }
 }
@@ -207,16 +276,19 @@ impl JsonQuoteOptions {
         escape_sequences.push((b'\\', b"\\\\".to_vec()));
         escape_sequences.push((b'"', b"\\\"".to_vec()));
 
-        let (fallback_prefix, max_fallback_byte) = if self.is_allowed(b'u') {
-            (Some(b"\\u00".to_vec()), Some(0x7F))
+        let fallback = if self.is_allowed(b'u') {
+            Some(FallbackFormat {
+                prefix: b"\\u00".to_vec(),
+                suffix: vec![],
+                valid_byte_ranges: Some(vec![(0x00, 0x7F)]),
+            })
         } else {
-            (None, None)
+            None
         };
 
         StringEscapeOptions {
             escape_sequences,
-            fallback_prefix,
-            max_fallback_byte,
+            fallback,
             must_escape: (0x00..=0x1Fu8).chain([b'\\', b'"', 0x7F]).collect(),
         }
     }
@@ -535,18 +607,20 @@ impl RegexBuilder {
         let mut options = options.clone();
         options.normalize();
 
-        // Validate max_fallback_byte
-        if let (Some(_prefix), Some(max_byte)) =
-            (&options.fallback_prefix, options.max_fallback_byte)
-        {
-            for &b in &options.must_escape {
-                if b > max_byte && !options.escape_sequences.iter().any(|(byte, _)| *byte == b) {
-                    anyhow::bail!(
-                        "fallback cannot represent byte 0x{:02X} (max 0x{:02X}); \
-                         add an explicit escape_sequence for it",
-                        b,
-                        max_byte
-                    );
+        // Validate valid_byte_ranges: every must-escape byte outside the
+        // valid ranges needs an explicit escape_sequence.
+        if let Some(ref fb) = options.fallback {
+            if fb.valid_byte_ranges.is_some() {
+                for &b in &options.must_escape {
+                    if !fb.covers_byte(b)
+                        && !options.escape_sequences.iter().any(|(byte, _)| *byte == b)
+                    {
+                        anyhow::bail!(
+                            "fallback cannot represent byte 0x{:02X} (outside valid_byte_ranges); \
+                             add an explicit escape_sequence for it",
+                            b,
+                        );
+                    }
                 }
             }
         }
@@ -557,7 +631,7 @@ impl RegexBuilder {
             escape_idx[*byte as usize] = Some(i);
         }
 
-        let fallback_prefix = options.fallback_prefix.clone();
+        let fallback = options.fallback.clone();
 
         // Build must_escape bitset
         let mut must_escape_set = [false; 256];
@@ -579,16 +653,21 @@ impl RegexBuilder {
             }
         }
 
-        // Build a regex for fallback_prefix + 2 case-insensitive hex digits for byte b
-        fn mk_fallback_hex(exprset: &mut ExprSet, prefix: &[u8], b: u8) -> ExprRef {
-            let prefix_expr = if prefix.is_empty() {
+        // Build a regex for prefix + 2 case-insensitive hex digits + suffix for byte b
+        fn mk_fallback_hex(exprset: &mut ExprSet, fb: &FallbackFormat, b: u8) -> ExprRef {
+            let prefix_expr = if fb.prefix.is_empty() {
                 ExprRef::EMPTY_STRING
             } else {
-                exprset.mk_byte_literal(prefix)
+                exprset.mk_byte_literal(&fb.prefix)
             };
             let high = mk_hex_digit(exprset, b >> 4);
             let low = mk_hex_digit(exprset, b & 0x0F);
-            exprset.mk_concat_vec(&[prefix_expr, high, low])
+            let suffix_expr = if fb.suffix.is_empty() {
+                ExprRef::EMPTY_STRING
+            } else {
+                exprset.mk_byte_literal(&fb.suffix)
+            };
+            exprset.mk_concat_vec(&[prefix_expr, high, low, suffix_expr])
         }
 
         fn quote_byteset(
@@ -596,7 +675,7 @@ impl RegexBuilder {
             bs: Vec<u32>,
             escape_sequences: &[(u8, Vec<u8>)],
             escape_idx: &[Option<usize>; 256],
-            fallback_prefix: Option<&[u8]>,
+            fallback: Option<&FallbackFormat>,
             must_escape_set: &[bool; 256],
         ) -> ExprRef {
             let mut alts = vec![];
@@ -612,8 +691,11 @@ impl RegexBuilder {
                 }
                 // Also add fallback — a byte can have both an explicit
                 // escape and a fallback (e.g., JSON \b and \u0008 for 0x08).
-                if let Some(prefix) = fallback_prefix {
-                    alts.push(mk_fallback_hex(exprset, prefix, b));
+                // Only generate fallback if the byte is within valid_byte_ranges.
+                if let Some(fb) = fallback {
+                    if fb.covers_byte(b) {
+                        alts.push(mk_fallback_hex(exprset, fb, b));
+                    }
                 }
                 // If neither exists, byte is excluded from output
                 byteset_clear(&mut bs_passthrough, b as usize);
@@ -646,7 +728,7 @@ impl RegexBuilder {
                                 bs,
                                 &options.escape_sequences,
                                 &escape_idx,
-                                fallback_prefix.as_deref(),
+                                fallback.as_ref(),
                                 &must_escape_set,
                             )
                         } else {
@@ -660,7 +742,7 @@ impl RegexBuilder {
                                 byteset_from_range(b, b),
                                 &options.escape_sequences,
                                 &escape_idx,
-                                fallback_prefix.as_deref(),
+                                fallback.as_ref(),
                                 &must_escape_set,
                             )
                         } else {
@@ -688,7 +770,7 @@ impl RegexBuilder {
                                         byteset_from_range(b, b),
                                         &options.escape_sequences,
                                         &escape_idx,
-                                        fallback_prefix.as_deref(),
+                                        fallback.as_ref(),
                                         &must_escape_set,
                                     );
                                     ConcatElement::Expr(q).push_owned_to(&mut acc);
