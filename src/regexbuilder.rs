@@ -102,7 +102,8 @@ pub struct StringEscapeOptions {
     pub must_escape: Vec<u8>,
 }
 
-impl StringEscapeOptions {    /// Sort and deduplicate `escape_sequences` and `must_escape`.
+impl StringEscapeOptions {
+    /// Sort and deduplicate `escape_sequences` and `must_escape`.
     /// Called automatically by [`RegexBuilder::string_escape`].
     pub fn normalize(&mut self) {
         self.escape_sequences.sort_by_key(|(b, _)| *b);
