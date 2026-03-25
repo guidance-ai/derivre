@@ -77,7 +77,11 @@ impl FallbackFormat {
 /// [`fallback`](Self::fallback) hex form. When both exist, both are accepted
 /// (e.g., JSON `\b` and `\u0008` are both valid for byte 0x08). Must-escape
 /// bytes with neither form are excluded from the output regex — the byte
-/// simply cannot be represented.
+/// simply cannot be represented. However, if `fallback` has
+/// [`valid_byte_ranges`](FallbackFormat::valid_byte_ranges) set, a must-escape
+/// byte outside those ranges without an explicit escape will cause
+/// [`string_escape`](RegexBuilder::string_escape) to return an error rather
+/// than silently excluding it.
 ///
 /// Delimiter wrapping (e.g., surrounding with `"`) is NOT handled here;
 /// that is the caller's responsibility.
@@ -105,11 +109,24 @@ pub struct StringEscapeOptions {
 impl StringEscapeOptions {
     /// Sort and deduplicate `escape_sequences` and `must_escape`.
     /// Called automatically by [`RegexBuilder::string_escape`].
-    pub fn normalize(&mut self) {
+    ///
+    /// Returns an error if `escape_sequences` contains duplicate entries
+    /// for the same byte with different sequences.
+    pub fn normalize(&mut self) -> Result<()> {
         self.escape_sequences.sort_by_key(|(b, _)| *b);
+        // Check for conflicting duplicates before dedup
+        for w in self.escape_sequences.windows(2) {
+            if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
+                anyhow::bail!(
+                    "conflicting escape_sequences for byte 0x{:02X}",
+                    w[0].0
+                );
+            }
+        }
         self.escape_sequences.dedup_by_key(|(b, _)| *b);
         self.must_escape.sort();
         self.must_escape.dedup();
+        Ok(())
     }
 
     /// Build options for JSON string escaping.
@@ -606,7 +623,7 @@ impl RegexBuilder {
     /// unescaped according to the given grammar, yield strings matching R.
     pub fn string_escape(&mut self, e: ExprRef, options: &StringEscapeOptions) -> Result<ExprRef> {
         let mut options = options.clone();
-        options.normalize();
+        options.normalize()?;
 
         // Validate valid_byte_ranges: every must-escape byte outside the
         // valid ranges needs an explicit escape_sequence.
@@ -677,13 +694,13 @@ impl RegexBuilder {
             escape_sequences: &[(u8, Vec<u8>)],
             escape_idx: &[Option<usize>; 256],
             fallback: Option<&FallbackFormat>,
-            must_escape_set: &[bool; 256],
+            must_escape: &[u8],
         ) -> ExprRef {
             let mut alts = vec![];
             let mut bs_passthrough = bs;
 
-            for b in 0..=255u8 {
-                if !byteset_contains(&bs_passthrough, b as usize) || !must_escape_set[b as usize] {
+            for &b in must_escape {
+                if !byteset_contains(&bs_passthrough, b as usize) {
                     continue;
                 }
                 if let Some(idx) = escape_idx[b as usize] {
@@ -719,9 +736,10 @@ impl RegexBuilder {
             |exprset, args, e| -> ExprRef {
                 match exprset.get(e) {
                     Expr::ByteSet(bs) => {
-                        let needs = (0..=255u8).any(|b| {
-                            byteset_contains(bs, b as usize) && must_escape_set[b as usize]
-                        });
+                        let needs = options
+                            .must_escape
+                            .iter()
+                            .any(|&b| byteset_contains(bs, b as usize));
                         if needs {
                             let bs = bs.to_vec();
                             quote_byteset(
@@ -730,7 +748,7 @@ impl RegexBuilder {
                                 &options.escape_sequences,
                                 &escape_idx,
                                 fallback.as_ref(),
-                                &must_escape_set,
+                                &options.must_escape,
                             )
                         } else {
                             e
@@ -744,7 +762,7 @@ impl RegexBuilder {
                                 &options.escape_sequences,
                                 &escape_idx,
                                 fallback.as_ref(),
-                                &must_escape_set,
+                                &options.must_escape,
                             )
                         } else {
                             e
@@ -772,7 +790,7 @@ impl RegexBuilder {
                                         &options.escape_sequences,
                                         &escape_idx,
                                         fallback.as_ref(),
-                                        &must_escape_set,
+                                        &options.must_escape,
                                     );
                                     ConcatElement::Expr(q).push_owned_to(&mut acc);
                                     idx += 1;

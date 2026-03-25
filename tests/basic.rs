@@ -534,8 +534,6 @@ fn test_string_escape_single_quote() {
     // Bell character (0x07) should escape as \a or \x07 (both valid)
     let e = b.mk_regex(r#"\x07"#).unwrap();
     let r = b.string_escape(e, &opts).unwrap();
-    let s = b.exprset().expr_to_string(r);
-    println!("bell escape: {}", s);
     let mut rx = b.to_regex(r);
     match_many(&mut rx, &["\\a", "\\x07"]);
 }
