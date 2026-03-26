@@ -117,10 +117,7 @@ impl StringEscapeOptions {
         // Check for conflicting duplicates before dedup
         for w in self.escape_sequences.windows(2) {
             if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
-                anyhow::bail!(
-                    "conflicting escape_sequences for byte 0x{:02X}",
-                    w[0].0
-                );
+                anyhow::bail!("conflicting escape_sequences for byte 0x{:02X}", w[0].0);
             }
         }
         self.escape_sequences.dedup_by_key(|(b, _)| *b);
