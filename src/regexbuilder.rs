@@ -229,6 +229,12 @@ impl StringEscapeOptions {
     /// 0x00–0x08, 0x0B, 0x0C, and 0x0E–0x1F entirely — these code
     /// points cannot appear in an XML document at all (not even as numeric
     /// character references).
+    ///
+    /// Note: this constructor does not prevent forbidden control bytes from
+    /// passing through literally if they appear in the input regex. If the
+    /// input regex can match forbidden bytes, the caller should intersect it
+    /// with a character-class restriction (e.g., `[\x09\x0A\x0D\x20-\xFF]`)
+    /// before calling `string_escape`.
     pub fn xml() -> Self {
         Self {
             escape_sequences: vec![
