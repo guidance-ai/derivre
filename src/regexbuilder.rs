@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use std::hash::Hash;
 
 use crate::HashMap;
 use anyhow::{ensure, Result};
@@ -267,7 +266,7 @@ impl StringEscapeOptions {
 pub struct JsonQuoteOptions {
     /// Which escape forms to allow (each char enables one):
     /// `n`, `r`, `b`, `t`, `f` — single-char control escapes;
-    /// `u` — `\uXXXX` for 0x00–0x1F and 0x7F;
+    /// `u` — `\u00XX` fallback for any must-escape byte ≤ 0x7F;
     /// `\`, `"` — accepted but have no effect (always enabled).
     pub allowed_escapes: String,
 
