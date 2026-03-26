@@ -107,11 +107,14 @@ pub struct StringEscapeOptions {
 }
 
 impl StringEscapeOptions {
-    /// Sort and deduplicate `escape_sequences` and `must_escape`.
+    /// Sort and deduplicate `escape_sequences` and `must_escape`, and
+    /// canonicalize `fallback.valid_byte_ranges` so that semantically
+    /// equivalent options hash identically when used as cache keys.
     /// Called automatically by [`RegexBuilder::string_escape`].
     ///
     /// Returns an error if `escape_sequences` contains duplicate entries
-    /// for the same byte with different sequences.
+    /// for the same byte with different sequences, or if `valid_byte_ranges`
+    /// contains an entry where `start > end`.
     pub fn normalize(&mut self) -> Result<()> {
         self.escape_sequences.sort_by_key(|(b, _)| *b);
         // Check for conflicting duplicates before dedup
@@ -123,6 +126,33 @@ impl StringEscapeOptions {
         self.escape_sequences.dedup_by_key(|(b, _)| *b);
         self.must_escape.sort();
         self.must_escape.dedup();
+
+        // Canonicalize valid_byte_ranges: sort, validate, merge overlapping/adjacent.
+        if let Some(ref mut fb) = self.fallback {
+            if let Some(ref mut ranges) = fb.valid_byte_ranges {
+                ranges.sort_by_key(|(lo, _)| *lo);
+                let mut merged: Vec<(u8, u8)> = Vec::with_capacity(ranges.len());
+                for &(lo, hi) in ranges.iter() {
+                    ensure!(
+                        lo <= hi,
+                        "invalid valid_byte_ranges entry: start 0x{:02X} > end 0x{:02X}",
+                        lo,
+                        hi
+                    );
+                    if let Some((_, last_hi)) = merged.last_mut() {
+                        if last_hi.saturating_add(1) >= lo {
+                            if hi > *last_hi {
+                                *last_hi = hi;
+                            }
+                            continue;
+                        }
+                    }
+                    merged.push((lo, hi));
+                }
+                *ranges = merged;
+            }
+        }
+
         Ok(())
     }
 
@@ -194,10 +224,11 @@ impl StringEscapeOptions {
     /// Uses named entities for `&`, `<`, `>`, `"`, `'` and `&#xNN;` hex
     /// fallback for the XML 1.0–legal control characters (TAB, LF, CR).
     ///
-    /// Only bytes that are valid XML 1.0 characters are included in
-    /// `must_escape`. XML 1.0 forbids 0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F,
-    /// and 0x7F entirely — these bytes cannot appear in an XML document at
-    /// all (not even as numeric character references).
+    /// Only bytes whose corresponding Unicode scalar values are valid XML
+    /// 1.0 characters are included in `must_escape`. XML 1.0 forbids
+    /// 0x00–0x08, 0x0B, 0x0C, and 0x0E–0x1F entirely — these code
+    /// points cannot appear in an XML document at all (not even as numeric
+    /// character references).
     pub fn xml() -> Self {
         Self {
             escape_sequences: vec![
@@ -271,6 +302,10 @@ impl JsonQuoteOptions {
     ///
     /// The `\\` and `"` entries in `allowed_escapes` are ignored; backslash
     /// and double-quote escaping are always enabled in the result.
+    ///
+    /// Note: this method does not validate `allowed_escapes`. Invalid
+    /// characters are silently ignored. Use [`RegexBuilder::json_quote`]
+    /// for validation, or validate before calling this method.
     pub fn to_string_escape_options(&self) -> StringEscapeOptions {
         // (escape_char, source_byte) — escape_char doubles as the allowed_escapes key
         let escape_map: &[(u8, u8)] = &[
