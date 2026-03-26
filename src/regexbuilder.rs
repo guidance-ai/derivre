@@ -671,8 +671,7 @@ impl RegexBuilder {
                         && !options.escape_sequences.iter().any(|(byte, _)| *byte == b)
                     {
                         anyhow::bail!(
-                            "fallback cannot represent byte 0x{:02X} (outside valid_byte_ranges); \
-                             add an explicit escape_sequence for it",
+                            "fallback cannot represent byte 0x{:02X} (outside valid_byte_ranges); add an explicit escape_sequence for it",
                             b,
                         );
                     }
