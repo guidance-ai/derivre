@@ -24,8 +24,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_id || github.sha }}
     steps:
     - uses: actions/checkout@v6
       with:
