@@ -42,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_id || github.sha }}
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@1.87.0
       with:
