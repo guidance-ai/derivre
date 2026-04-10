@@ -9,6 +9,10 @@ use crate::{hashcons::VecHashCons, pp::PrettyPrinter, simplify::OwnedConcatEleme
 use bytemuck_derive::{Pod, Zeroable};
 use strum::FromRepr;
 
+/// An opaque handle that references an expression node inside an [`ExprSet`](crate::raw::ExprSet).
+///
+/// Predefined constants such as [`ExprRef::EMPTY_STRING`] and [`ExprRef::NO_MATCH`]
+/// are available for common expression leaves.
 #[derive(Pod, Zeroable, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct ExprRef(pub(crate) u32);
@@ -332,6 +336,11 @@ impl<'a> Expr<'a> {
     }
 }
 
+/// The core expression storage (hash-consed AST arena).
+///
+/// Expressions are stored as flattened `u32` vectors and deduplicated via
+/// hash-consing, so structurally identical sub-expressions share the same
+/// [`ExprRef`].
 #[derive(Clone)]
 pub struct ExprSet {
     exprs: VecHashCons,
@@ -730,6 +739,11 @@ impl ExprSet {
     }
 }
 
+/// Describes the "next byte" information for a given expression or state.
+///
+/// This is used by the engine to determine whether a state is forced to
+/// accept exactly one byte, is waiting for end-of-input, or has multiple
+/// possible transitions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NextByte {
     /// Transition via any other byte, or EOI leads to a dead state.
