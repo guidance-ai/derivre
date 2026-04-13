@@ -6,11 +6,6 @@ struct StackNode<'a, T, S> {
     args: Vec<S>,
 }
 
-/// Performs a non-recursive, bottom-up fold over a tree of type `T`, producing a
-/// value of type `S`.
-///
-/// `get_args` extracts the children of a node, and `map_node` maps each node
-/// together with the already-computed results for its children.
 pub fn map_ast<T, S>(
     ast: &T,
     get_args: impl Fn(&T) -> &[T],
