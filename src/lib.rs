@@ -1,10 +1,5 @@
 //! A derivative-based regular expression engine.
 //!
-//! This crate implements regular expression matching using
-//! [Brzozowski derivatives](https://en.wikipedia.org/wiki/Brzozowski_derivative),
-//! building a DFA lazily as input is processed. It uses the
-//! [`regex-syntax`](https://docs.rs/regex-syntax) crate for parsing.
-//!
 //! The primary entry point is [`Regex`] for simple patterns, or [`RegexBuilder`]
 //! for constructing regexes programmatically from [`RegexAst`] trees.
 //!
@@ -13,7 +8,7 @@
 //! search for matches within the input.
 //!
 //! **Lookahead.** A single look-ahead at the end of the regex is supported
-//! via the `(?P<stop>…)` syntax. See [`Regex::lookahead_len`] for details.
+//! via the `A(?P<stop>B)` syntax. See [`Regex::lookahead_len`] for details.
 //!
 //! # Example
 //!
