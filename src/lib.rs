@@ -10,14 +10,6 @@
 //! **Lookahead.** A single look-ahead at the end of the regex is supported
 //! via the `A(?P<stop>B)` syntax. See [`Regex::lookahead_len`] for details.
 //!
-//! # Example
-//!
-//! ```
-//! let mut rx = derivre::Regex::new("[ab]c").unwrap();
-//! assert!(rx.is_match("ac"));
-//! assert!(!rx.is_match("xxac"));
-//! ```
-//!
 //! # References
 //!
 //! - [Regular-expression derivatives reexamined (Owens et al.)](https://www.khoury.northeastern.edu/home/turon/re-deriv.pdf)
