@@ -35,3 +35,5 @@ pub mod raw {
     pub use super::nextbyte::NextByteCache;
     pub use super::relevance::RelevanceCache;
 }
+
+pub const VERSION: &str = concat!("derivre@", env!("CARGO_PKG_VERSION"));
