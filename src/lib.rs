@@ -14,7 +14,7 @@
 //!
 //! - [Regular-expression derivatives reexamined (Owens et al.)](https://www.khoury.northeastern.edu/home/turon/re-deriv.pdf)
 //! - [Derivative Based Nonbacktracking Real-World Regex Matching with Backtracking Semantics](https://www.microsoft.com/en-us/research/uploads/prod/2023/04/pldi23main-p249-final.pdf)
-//! - [Derivative Based Extended Regular Expression Matching Supporting Intersection, Complement and Lookarounds](https://arxiv.org/pdf/2309.14401)
+//! - [Derivative Based Extended Regular Expression Matching Supporting Intersection, Complement and Lookarounds](https://arxiv.org/abs/2309.14401)
 
 mod deriv;
 mod hashcons;
