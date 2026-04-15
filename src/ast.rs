@@ -741,11 +741,16 @@ impl ExprSet {
     }
 }
 
-/// Describes the "next byte" information for a given expression or state.
+/// Describes the "next byte" information for a given [`ExprRef`] or [`StateID`](crate::StateID).
 ///
-/// This is used by the engine to determine whether a state is forced to
-/// accept exactly one byte, is waiting for end-of-input, or has multiple
-/// possible transitions.
+/// Access this information through one of two public APIs:
+/// - For DFA states, call [`Regex::next_byte`](crate::Regex::next_byte) with a [`StateID`](crate::StateID).
+/// - For raw expressions, call [`raw::NextByteCache::next_byte`](crate::raw::NextByteCache::next_byte)
+///   with a [`raw::ExprSet`](crate::raw::ExprSet) and an [`ExprRef`].
+///
+/// This is used by the engine to determine whether the current position is
+/// forced to accept exactly one byte, is waiting for end-of-input, or has
+/// multiple possible transitions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NextByte {
     /// Transition via any other byte, or EOI leads to a dead state.
