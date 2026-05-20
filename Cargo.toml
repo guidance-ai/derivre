@@ -17,7 +17,7 @@ ahash = { version = "0.8.11", optional = true }
 anyhow = "1.0.95"
 bytemuck = "1.21.0"
 bytemuck_derive = "1.8.1"
-hashbrown = { version = "0.15.2", default-features = false }
+hashbrown = { version = "0.17.1", default-features = false }
 regex-syntax = "0.8.5"
 strum = { version = "0.28.0", features = ["derive"] }
 
