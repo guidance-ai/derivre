@@ -23,7 +23,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 
 [dev-dependencies]
 serde = { version = "1.0.217", features = ["derive"] }
-toml = "0.8.20"
+toml = "1.1.2"
 bstr = { version = "1.11.3", default-features = false, features = ["std", "serde"] }
 
 [[bin]]
