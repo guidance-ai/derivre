@@ -495,6 +495,7 @@ fn test_search() {
     assert_search("^[a-z]*$", "[a-z]*");
     assert_search("^(a|b)$", "a|b");
     assert_search("^(foo)*$", "(foo)*");
+    assert_search("^(^foo$)$|^$", "foo|");
     assert_search("colou?r", ".*colou?r.*");
     assert_search("[0-9]{2,4}", ".*[0-9]{2,4}.*");
     assert_search("^[^a-z]+$", "[^a-z]+");
